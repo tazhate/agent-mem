@@ -170,7 +170,7 @@ type Summary struct {
 	OriginID     string `json:"-"`
 }
 
-func InsertSummaryTx(ctx context.Context, tx *sql.Tx, su *Summary) error {
+func InsertSummaryTx(ctx context.Context, tx *sql.Tx, su *Summary) (bool, error) {
 	if su.CreatedAt == 0 {
 		su.CreatedAt = time.Now().UnixMilli()
 	}
@@ -178,16 +178,15 @@ func InsertSummaryTx(ctx context.Context, tx *sql.Tx, su *Summary) error {
 	if su.ProjectID != 0 {
 		pid = su.ProjectID
 	}
-	_, err := tx.ExecContext(ctx, `INSERT INTO summaries(session_id, project_id, request, investigated, learned, completed,
+	return InsertReturning(ctx, tx, `INSERT INTO summaries(session_id, project_id, request, investigated, learned, completed,
 		next_steps, notes, created_at, origin, origin_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT DO NOTHING`,
 		su.SessionID, pid, su.Request, su.Investigated, su.Learned, su.Completed, su.NextSteps, su.Notes, su.CreatedAt,
 		nullStr(su.Origin), nullStr(su.OriginID))
-	return err
 }
 
 func (s *Store) InsertSummary(ctx context.Context, su *Summary) error {
 	return s.Write(ctx, func(tx *sql.Tx) error {
-		if err := InsertSummaryTx(ctx, tx, su); err != nil {
+		if _, err := InsertSummaryTx(ctx, tx, su); err != nil {
 			return err
 		}
 		_, err := tx.ExecContext(ctx, `UPDATE sessions SET summarized_at = ? WHERE id = ?`, su.CreatedAt, su.SessionID)
@@ -268,23 +267,23 @@ type WorkList struct {
 	Open  bool           `json:"open"`
 }
 
-func AppendWorkTx(ctx context.Context, tx *sql.Tx, projectID int64, list string, fields map[string]any, ts int64, origin, originID string) error {
+func AppendWorkTx(ctx context.Context, tx *sql.Tx, projectID int64, list string, fields map[string]any, ts int64, origin, originID string) (bool, error) {
 	b, err := json.Marshal(fields)
 	if err != nil {
-		return err
+		return false, err
 	}
 	var pid any
 	if projectID != 0 {
 		pid = projectID
 	}
-	_, err = tx.ExecContext(ctx, `INSERT INTO work_entries(project_id, list, fields, created_at, origin, origin_id)
+	return InsertReturning(ctx, tx, `INSERT INTO work_entries(project_id, list, fields, created_at, origin, origin_id)
 		VALUES (?, ?, ?, ?, ?, ?) ON CONFLICT DO NOTHING`, pid, list, string(b), ts, nullStr(origin), nullStr(originID))
-	return err
 }
 
 func (s *Store) AppendWork(ctx context.Context, projectID int64, list string, fields map[string]any) error {
 	return s.Write(ctx, func(tx *sql.Tx) error {
-		return AppendWorkTx(ctx, tx, projectID, list, fields, time.Now().UnixMilli(), "", "")
+		_, err := AppendWorkTx(ctx, tx, projectID, list, fields, time.Now().UnixMilli(), "", "")
+		return err
 	})
 }
 

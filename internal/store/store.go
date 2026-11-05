@@ -32,7 +32,7 @@ func Open(path string) (*Store, error) {
 		return nil, err
 	}
 	q := url.Values{}
-	for _, p := range []string{"busy_timeout(10000)", "journal_mode(WAL)", "synchronous(NORMAL)", "foreign_keys(OFF)", "temp_store(MEMORY)", "cache_size(-32000)"} {
+	for _, p := range []string{"busy_timeout(10000)", "journal_mode(WAL)", "synchronous(NORMAL)", "foreign_keys(OFF)", "temp_store(MEMORY)", "cache_size(-65536)", "mmap_size(2147483648)"} {
 		q.Add("_pragma", p)
 	}
 	db, err := sql.Open("sqlite", "file:"+path+"?"+q.Encode())

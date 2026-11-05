@@ -143,8 +143,11 @@ func InsertMemoryTx(ctx context.Context, tx *sql.Tx, m *Memory) (id int64, creat
 		return 0, false, err
 	}
 	m.ID = id
-	if _, err = tx.ExecContext(ctx, `INSERT INTO memories_fts(rowid, title, body) VALUES (?, ?, ?)`,
-		id, stem.Text(m.Title), stem.Text(ftsBody(m))); err != nil {
+	title, body := stem.Text(m.Title), stem.Text(ftsBody(m))
+	if _, err = tx.ExecContext(ctx, `INSERT INTO memories_fts(rowid, title, body) VALUES (?, ?, ?)`, id, title, body); err != nil {
+		return 0, false, err
+	}
+	if err = bumpDF(ctx, tx, title+" "+body); err != nil {
 		return 0, false, err
 	}
 	for _, f := range m.Files {
@@ -328,7 +331,7 @@ func (s *Store) SearchFTS(ctx context.Context, stems []string, sc Scope, limit i
 		quoted[i] = `"` + strings.ReplaceAll(st, `"`, `""`) + `"`
 	}
 	args := []any{strings.Join(quoted, " OR ")}
-	q := `SELECT m.id, bm25(memories_fts, 3.0, 1.0) AS r FROM memories_fts JOIN memories m ON m.id = memories_fts.rowid
+	q := `SELECT m.id, bm25(memories_fts, 3.0, 1.0) AS r FROM memories_fts JOIN memories m INDEXED BY memories_scope ON m.id = memories_fts.rowid
 		WHERE memories_fts MATCH ? AND` + sc.where(&args) + ` ORDER BY r LIMIT ?`
 	args = append(args, limit)
 	rows, err := s.db.QueryContext(ctx, q, args...)
@@ -420,30 +423,62 @@ func placeholders(ids []int64) (string, []any) {
 // DocFreq returns how many memories contain each stem, plus the total memory count.
 func (s *Store) DocFreq(ctx context.Context, stems []string) (map[string]int, int, error) {
 	var total int
-	if err := s.db.QueryRowContext(ctx, `SELECT count(*) FROM memories`).Scan(&total); err != nil {
+	if err := s.db.QueryRowContext(ctx, `SELECT coalesce(max(id), 0) FROM memories`).Scan(&total); err != nil {
 		return nil, 0, err
 	}
 	out := make(map[string]int, len(stems))
 	if len(stems) == 0 {
 		return out, total, nil
 	}
-	args := make([]any, len(stems))
-	for i, s := range stems {
-		args[i] = s
-	}
-	rows, err := s.db.QueryContext(ctx, `SELECT term, doc FROM memories_vocab WHERE term IN (`+
-		strings.TrimSuffix(strings.Repeat("?,", len(stems)), ",")+`)`, args...)
-	if err != nil {
-		return nil, 0, err
-	}
-	defer rows.Close()
-	for rows.Next() {
-		var t string
+	for _, t := range stems {
 		var n int
-		if err := rows.Scan(&t, &n); err != nil {
+		err := s.db.QueryRowContext(ctx, `SELECT doc FROM stem_df WHERE term = ?`, t).Scan(&n)
+		if err != nil && err != sql.ErrNoRows {
 			return nil, 0, err
 		}
 		out[t] = n
 	}
-	return out, total, rows.Err()
+	return out, total, nil
+}
+
+// OptimizeFTS merges index segments; run after bulk imports.
+func (s *Store) OptimizeFTS(ctx context.Context) error {
+	return s.Write(ctx, func(tx *sql.Tx) error {
+		_, err := tx.ExecContext(ctx, `INSERT INTO memories_fts(memories_fts) VALUES ('optimize')`)
+		return err
+	})
+}
+
+// MergeFTS does a bounded amount of incremental segment merging.
+func (s *Store) MergeFTS(ctx context.Context) error {
+	return s.Write(ctx, func(tx *sql.Tx) error {
+		_, err := tx.ExecContext(ctx, `INSERT INTO memories_fts(memories_fts, rank) VALUES ('merge', 500)`)
+		return err
+	})
+}
+
+func bumpDF(ctx context.Context, tx *sql.Tx, stems string) error {
+	seen := map[string]bool{}
+	for t := range strings.FieldsSeq(stems) {
+		if seen[t] {
+			continue
+		}
+		seen[t] = true
+		if _, err := tx.ExecContext(ctx, `INSERT INTO stem_df(term, doc) VALUES (?, 1)
+			ON CONFLICT(term) DO UPDATE SET doc = doc + 1`, t); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// RebuildDF recomputes stem_df from the FTS vocabulary in one pass.
+func (s *Store) RebuildDF(ctx context.Context) error {
+	return s.Write(ctx, func(tx *sql.Tx) error {
+		if _, err := tx.ExecContext(ctx, `DELETE FROM stem_df`); err != nil {
+			return err
+		}
+		_, err := tx.ExecContext(ctx, `INSERT INTO stem_df(term, doc) SELECT term, doc FROM memories_vocab`)
+		return err
+	})
 }

@@ -79,6 +79,8 @@ CREATE TABLE IF NOT EXISTS memories (
 );
 CREATE INDEX IF NOT EXISTS memories_project ON memories(project_id, created_at);
 CREATE INDEX IF NOT EXISTS memories_session ON memories(session_id);
+-- Covering index for recall filters, so FTS hits are scoped without reading the wide rows.
+CREATE INDEX IF NOT EXISTS memories_scope ON memories(id, project_id, type, private, superseded_by, created_at);
 CREATE UNIQUE INDEX IF NOT EXISTS memories_origin ON memories(origin, origin_id) WHERE origin IS NOT NULL;
 
 CREATE TABLE IF NOT EXISTS memory_files (
@@ -156,3 +158,9 @@ CREATE TABLE IF NOT EXISTS watch_state (
 
 -- Document frequency per stem, for IDF-weighted relevance in recall.
 CREATE VIRTUAL TABLE IF NOT EXISTS memories_vocab USING fts5vocab(memories_fts, 'row');
+
+-- Materialized document frequency per stem (fts5vocab seeks are slow on big indexes).
+CREATE TABLE IF NOT EXISTS stem_df (
+	term TEXT PRIMARY KEY,
+	doc  INTEGER NOT NULL
+) WITHOUT ROWID;

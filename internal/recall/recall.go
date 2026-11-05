@@ -155,16 +155,28 @@ func (e *Engine) Search(ctx context.Context, text string, scope store.Scope, lim
 		return math.Log(1 + float64(total+1)/float64(df[s]+1))
 	}
 	// Long prompts: keep the most specific stems only.
+	slices.SortFunc(qstems, func(a, b string) int { return cmp.Compare(idf(b), idf(a)) })
 	if len(qstems) > 24 {
-		slices.SortFunc(qstems, func(a, b string) int { return cmp.Compare(idf(b), idf(a)) })
 		qstems = qstems[:24]
 	}
 	var idfSum float64
 	for _, s := range qstems {
 		idfSum += idf(s)
 	}
+	// The FTS candidate query only uses rare stems: a common stem matches tens of thousands of
+	// rows and makes bm25 sort them all, while adding almost nothing to ranking.
+	ftsStems := make([]string, 0, 8)
+	for _, s := range qstems {
+		if len(ftsStems) == 8 {
+			break
+		}
+		if df[s] == 0 || (float64(df[s]) > 0.05*float64(total) && len(ftsStems) >= 2) {
+			continue
+		}
+		ftsStems = append(ftsStems, s)
+	}
 	candLimit := max(limit*3, 30)
-	hits, err := e.st.SearchFTS(ctx, qstems, scope, candLimit)
+	hits, err := e.st.SearchFTS(ctx, ftsStems, scope, candLimit)
 	if err != nil {
 		return nil, err
 	}

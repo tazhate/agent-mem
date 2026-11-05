@@ -4,6 +4,8 @@ package stem
 
 import (
 	"strings"
+	"sync"
+	"sync/atomic"
 	"unicode"
 
 	"github.com/kljensen/snowball/english"
@@ -17,8 +19,27 @@ func Tokens(s string) []string {
 	})
 }
 
+// cache memoizes stems: vocabulary is small compared to how often words repeat, and snowball
+// dominates recall CPU without it.
+var cache sync.Map
+
+var cached atomic.Int64
+
 // Word stems one lowercase token. Mixed tokens (identifiers with digits) stay as they are.
 func Word(w string) string {
+	if v, ok := cache.Load(w); ok {
+		return v.(string)
+	}
+	st := word(w)
+	if cached.Load() < 500_000 {
+		if _, loaded := cache.LoadOrStore(strings.Clone(w), st); !loaded {
+			cached.Add(1)
+		}
+	}
+	return st
+}
+
+func word(w string) string {
 	if len(w) < 3 {
 		return w
 	}

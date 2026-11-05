@@ -157,17 +157,15 @@ func (s *Store) InsertEvent(ctx context.Context, tx *sql.Tx, e EventRow) (int64,
 	if e.ExitCode != nil {
 		exit = *e.ExitCode
 	}
-	res, err := tx.ExecContext(ctx, `INSERT INTO events(session_id, turn, kind, tool, input, output, error, exit_code, ts, origin, origin_id)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT DO NOTHING`,
+	var id int64
+	err := tx.QueryRowContext(ctx, `INSERT INTO events(session_id, turn, kind, tool, input, output, error, exit_code, ts, origin, origin_id)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT DO NOTHING RETURNING id`,
 		e.SessionID, e.Turn, e.Kind, nullStr(e.Tool), nullStr(e.Input), nullStr(e.Output), nullStr(e.Error), exit, e.TS,
-		nullStr(e.Origin), nullStr(e.OriginID))
-	if err != nil {
-		return 0, err
-	}
-	if n, _ := res.RowsAffected(); n == 0 {
+		nullStr(e.Origin), nullStr(e.OriginID)).Scan(&id)
+	if errors.Is(err, sql.ErrNoRows) {
 		return 0, nil
 	}
-	return res.LastInsertId()
+	return id, err
 }
 
 // PendingEvents returns unprocessed events of a session in order.
@@ -271,4 +269,15 @@ func (s *Store) ProjectsByName(ctx context.Context, name string) ([]int64, error
 		out = append(out, id)
 	}
 	return out, rows.Err()
+}
+
+// InsertReturning runs an INSERT ... ON CONFLICT DO NOTHING RETURNING id and reports whether a
+// row was created. RowsAffected is unreliable for DO NOTHING conflicts on partial indexes.
+func InsertReturning(ctx context.Context, tx *sql.Tx, q string, args ...any) (bool, error) {
+	var id int64
+	err := tx.QueryRowContext(ctx, q+` RETURNING id`, args...).Scan(&id)
+	if errors.Is(err, sql.ErrNoRows) {
+		return false, nil
+	}
+	return err == nil, err
 }

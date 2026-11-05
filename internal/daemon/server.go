@@ -188,6 +188,9 @@ func (s *Server) janitor(ctx context.Context) {
 	t := time.NewTicker(6 * time.Hour)
 	defer t.Stop()
 	for {
+		if err := s.st.MergeFTS(ctx); err != nil {
+			s.log.Warn("fts merge", "err", err)
+		}
 		if ret := s.cfg.Capture.RawRetention.Duration; ret > 0 {
 			if n, err := s.st.PruneEvents(ctx, time.Now().Add(-ret).UnixMilli()); err == nil && n > 0 {
 				s.log.Info("pruned raw events", "rows", n)

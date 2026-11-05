@@ -121,7 +121,7 @@ func Default() *Config {
 			FileLimit:           3,
 			ErrorLimit:          2,
 			MinPromptChars:      15,
-			MinScore:            0.3,
+			MinScore:            0.25,
 			GlobalPreferences:   true,
 		},
 		Observer: ObserverConfig{
