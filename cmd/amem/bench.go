@@ -9,11 +9,11 @@ import (
 	"path/filepath"
 	"runtime/pprof"
 	"slices"
-	"strconv"
 	"strings"
-	"syscall"
 	"time"
 
+	"github.com/tazhate/agent-mem/internal/config"
+	"github.com/tazhate/agent-mem/internal/daemon"
 	"github.com/tazhate/agent-mem/internal/recall"
 	"github.com/tazhate/agent-mem/internal/store"
 )
@@ -35,7 +35,10 @@ func cmdBench(args []string) int {
 		if err != nil {
 			return fail("%v", err)
 		}
-		pprof.StartCPUProfile(f)
+		defer f.Close()
+		if err := pprof.StartCPUProfile(f); err != nil {
+			return fail("cpu profile: %v", err)
+		}
 		defer pprof.StopCPUProfile()
 	}
 	switch args[0] {
@@ -107,11 +110,13 @@ func benchHook(n int) int {
 	os.WriteFile(filepath.Join(home, "config.toml"), []byte("[observer]\nenabled = false\n"), 0o600)
 	env := append(os.Environ(), "AMEM_HOME="+home)
 	defer func() {
-		if pid, err := os.ReadFile(filepath.Join(home, "amemd.lock")); err == nil {
-			if p, err := strconv.Atoi(strings.TrimSpace(string(pid))); err == nil {
-				syscall.Kill(p, syscall.SIGTERM)
-			}
+		// Stop the scratch daemon over its own socket (never by a PID read from a file) and
+		// wait until it released its lock, so it cannot recreate the temp dir after removal.
+		scratch := loadCfgAt(home)
+		if daemon.WaitReady(scratch, 5*time.Second) {
+			_, _ = daemon.Call(scratch, &daemon.Request{Op: daemon.OpRestart}, time.Second)
 		}
+		daemon.WaitStopped(scratch, 5*time.Second)
 	}()
 	payload := `{"session_id":"bench","cwd":"/tmp","hook_event_name":"PostToolUse","tool_name":"Bash","tool_input":{"command":"true"},"tool_response":{"stdout":""}}`
 	var lat []time.Duration
@@ -134,4 +139,11 @@ func report(name string, lat []time.Duration) {
 	p := func(q float64) time.Duration { return lat[min(len(lat)-1, int(float64(len(lat))*q))] }
 	fmt.Printf("%s: n=%d p50=%s p90=%s p99=%s max=%s\n", name, len(lat),
 		p(0.5).Round(time.Microsecond), p(0.9).Round(time.Microsecond), p(0.99).Round(time.Microsecond), lat[len(lat)-1].Round(time.Microsecond))
+}
+
+// loadCfgAt returns defaults rooted at a scratch data directory.
+func loadCfgAt(home string) *config.Config {
+	c := config.Default()
+	c.DataDir = home
+	return c
 }

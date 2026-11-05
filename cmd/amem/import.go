@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 
@@ -82,14 +83,23 @@ func cmdImport(args []string) int {
 	return 0
 }
 
-// parseDays accepts Go durations plus a "d" suffix for days.
+// parseDays accepts Go durations plus a whole number of days ("30d"); it must be positive.
 func parseDays(s string) (time.Duration, error) {
+	var d time.Duration
 	if n, ok := strings.CutSuffix(s, "d"); ok {
-		var days int
-		if _, err := fmt.Sscanf(n, "%d", &days); err != nil {
+		days, err := strconv.Atoi(n)
+		if err != nil {
+			return 0, fmt.Errorf("%q: days must be a whole number", s)
+		}
+		d = time.Duration(days) * 24 * time.Hour
+	} else {
+		var err error
+		if d, err = time.ParseDuration(s); err != nil {
 			return 0, err
 		}
-		return time.Duration(days) * 24 * time.Hour, nil
 	}
-	return time.ParseDuration(s)
+	if d <= 0 {
+		return 0, fmt.Errorf("%q: must be positive", s)
+	}
+	return d, nil
 }

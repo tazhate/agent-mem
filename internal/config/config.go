@@ -31,7 +31,7 @@ func (d *Duration) UnmarshalText(b []byte) error {
 func (d Duration) MarshalText() ([]byte, error) { return []byte(d.String()), nil }
 
 type Config struct {
-	DataDir  string         `toml:"data_dir"`
+	DataDir  string         `toml:"data_dir,omitempty"`
 	Daemon   DaemonConfig   `toml:"daemon"`
 	Capture  CaptureConfig  `toml:"capture"`
 	Recall   RecallConfig   `toml:"recall"`
@@ -235,6 +235,9 @@ func (c *Config) validate() {
 	if c.Observer.IdleFlush.Duration <= 0 {
 		c.Observer.IdleFlush = d.Observer.IdleFlush
 	}
+	if c.Embed.Kind == "ollama" { // what users call it; it speaks the OpenAI-compatible API
+		c.Embed.Kind = "openai"
+	}
 	switch c.Embed.Kind {
 	case "", "none", "openai", "static":
 	default:
@@ -255,8 +258,14 @@ func Fallback(err error) *Config {
 
 func (c *Config) File() string { return c.path }
 
-// Save writes the config with 0600 permissions.
+// Save writes the config with 0600 permissions. The default data directory is left out, so
+// AMEM_HOME and XDG_DATA_HOME keep working.
 func (c *Config) Save(path string) error {
+	out := *c
+	if out.DataDir == Home() {
+		out.DataDir = ""
+	}
+	c = &out
 	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
 		return err
 	}

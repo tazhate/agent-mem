@@ -83,7 +83,7 @@ const (
 
 type SearchParams struct {
 	Query   string   `json:"query"`
-	Project string   `json:"project,omitempty"` // project name or cwd; empty = all projects
+	Project string   `json:"project,omitempty"` // project name; with Cwd empty too, all projects
 	Cwd     string   `json:"cwd,omitempty"`
 	Types   []string `json:"types,omitempty"`
 	Limit   int      `json:"limit,omitempty"`

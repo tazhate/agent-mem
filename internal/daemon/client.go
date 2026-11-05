@@ -46,8 +46,8 @@ func Call(cfg *config.Config, req *Request, timeout time.Duration) (*Response, e
 	if err := json.Unmarshal(line, &resp); err != nil {
 		return nil, err
 	}
-	if !resp.OK && resp.Error != "" {
-		return &resp, errors.New(resp.Error)
+	if !resp.OK {
+		return &resp, errors.New(cmpOr(resp.Error, "daemon returned an error without details"))
 	}
 	return &resp, nil
 }
@@ -61,11 +61,8 @@ func CallData(cfg *config.Config, op string, params, out any) error {
 	req := &Request{Op: op, Params: raw}
 	resp, err := Call(cfg, req, 10*time.Second)
 	if err != nil && IsUnavailable(err) {
-		if err := Spawn(cfg); err != nil {
+		if err := StartAndWait(cfg, 20*time.Second); err != nil {
 			return err
-		}
-		if !WaitReady(cfg, 3*time.Second) {
-			return fmt.Errorf("daemon did not start; see %s", cfg.LogPath())
 		}
 		resp, err = Call(cfg, req, 10*time.Second)
 	}
@@ -109,6 +106,50 @@ func Spawn(cfg *config.Config) error {
 	return cmd.Process.Release()
 }
 
+// StartAndWait starts the daemon and waits until it answers. It returns early when the started
+// process exits without answering (bad config, broken database), pointing at the log.
+func StartAndWait(cfg *config.Config, timeout time.Duration) error {
+	exe, err := os.Executable()
+	if err != nil {
+		return err
+	}
+	if err := os.MkdirAll(cfg.DataDir, 0o700); err != nil {
+		return err
+	}
+	logf, err := os.OpenFile(cfg.LogPath(), os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o600)
+	if err != nil {
+		return err
+	}
+	defer logf.Close()
+	cmd := exec.Command(exe, "daemon")
+	cmd.Dir = "/"
+	cmd.Stdout, cmd.Stderr = logf, logf
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setsid: true}
+	cmd.Env = append(os.Environ(), "AMEM_DISABLE=1")
+	if err := cmd.Start(); err != nil {
+		return err
+	}
+	exited := make(chan error, 1)
+	go func() { exited <- cmd.Wait() }()
+	end := time.Now().Add(timeout)
+	for time.Now().Before(end) {
+		if _, err := Call(cfg, &Request{Op: OpPing}, 200*time.Millisecond); err == nil {
+			return nil
+		}
+		select {
+		case err := <-exited:
+			// Exit 0 means another daemon holds the lock (it may still be migrating): keep
+			// polling. A failure exit (bad config, broken database) will not get better.
+			if err != nil {
+				return fmt.Errorf("daemon exited during start (%v); see %s", err, cfg.LogPath())
+			}
+			exited = nil
+		case <-time.After(50 * time.Millisecond):
+		}
+	}
+	return fmt.Errorf("daemon did not answer within %s; see %s", timeout, cfg.LogPath())
+}
+
 // WaitReady polls until the daemon answers a ping or the timeout passes.
 func WaitReady(cfg *config.Config, timeout time.Duration) bool {
 	end := time.Now().Add(timeout)
@@ -131,4 +172,11 @@ func selfExe() string {
 		return p
 	}
 	return exe
+}
+
+func cmpOr(a, b string) string {
+	if a != "" {
+		return a
+	}
+	return b
 }

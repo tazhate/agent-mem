@@ -52,11 +52,6 @@ func Open(path string) (*Store, error) {
 	return s, nil
 }
 
-// OpenReadOnly opens an existing database without write access (used for inspection tools).
-func OpenReadOnly(path string) (*sql.DB, error) {
-	return sql.Open("sqlite", "file:"+path+"?mode=ro&_pragma=busy_timeout(10000)")
-}
-
 func (s *Store) Close() error { return s.db.Close() }
 
 func (s *Store) DB() *sql.DB { return s.db }
@@ -147,7 +142,13 @@ func (s *Store) SetMeta(ctx context.Context, key, value string) error {
 
 // Stats is a quick inventory for `amem doctor`.
 type Stats struct {
-	Projects, Sessions, Events, PendingEvents, Memories, Summaries, Vectors int64
+	Projects      int64 `json:"projects"`
+	Sessions      int64 `json:"sessions"`
+	Events        int64 `json:"events"`
+	PendingEvents int64 `json:"pending_events"`
+	Memories      int64 `json:"memories"`
+	Summaries     int64 `json:"summaries"`
+	Vectors       int64 `json:"vectors"`
 }
 
 func (s *Store) Stats(ctx context.Context) (Stats, error) {

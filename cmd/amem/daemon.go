@@ -41,7 +41,10 @@ func cmdDaemon(args []string) int {
 	if err != nil {
 		return fail("lock: %v", err)
 	}
-	defer lock.Close()
+	defer func() {
+		_ = lock.Truncate(0) // a stale PID must not point at whatever process reuses it
+		lock.Close()
+	}()
 
 	st, err := store.Open(cfg.DBPath())
 	if err != nil {

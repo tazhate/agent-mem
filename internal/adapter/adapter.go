@@ -42,10 +42,6 @@ func Get(name string) (Adapter, error) {
 	return a, nil
 }
 
-func Names() []string {
-	return []string{"claude-code", "codex", "gemini", "cursor", "opencode", "kimi"}
-}
-
 // ErrSkip marks payloads that carry nothing worth recording (unknown events and the like).
 var ErrSkip = fmt.Errorf("skip")
 

@@ -97,7 +97,7 @@ func New(call Caller, cwd string) *mcp.Server {
 			if err := call(daemon.OpGet, daemon.GetParams{IDs: in.IDs}, &mems); err != nil {
 				return nil, nil, err
 			}
-			return text(formatMemories(mems)), nil, nil
+			return text(FormatMemories(mems)), nil, nil
 		})
 
 	mcp.AddTool(s, &mcp.Tool{Name: "memory_timeline", Description: "Show what happened around a memory in the same project, in time order."},
@@ -201,7 +201,8 @@ func text(s string) *mcp.CallToolResult {
 	return &mcp.CallToolResult{Content: []mcp.Content{&mcp.TextContent{Text: s}}}
 }
 
-func formatMemories(mems []*store.Memory) string {
+// FormatMemories renders full records for agents and the CLI.
+func FormatMemories(mems []*store.Memory) string {
 	if len(mems) == 0 {
 		return "not found"
 	}
@@ -212,7 +213,7 @@ func formatMemories(mems []*store.Memory) string {
 			scope = "global"
 		}
 		fmt.Fprintf(&b, "#%d %s [%s] %s\n%s\n", m.ID, m.Type, scope, time.UnixMilli(m.CreatedAt).Format("2006-01-02"), m.Title)
-		if m.Body != "" {
+		if m.Body != "" && strings.TrimSpace(m.Body) != strings.TrimSpace(strings.TrimSuffix(m.Title, "…")) {
 			b.WriteString(m.Body + "\n")
 		}
 		for _, f := range m.Facts {

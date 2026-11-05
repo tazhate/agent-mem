@@ -3,6 +3,7 @@
 package main
 
 import (
+	"cmp"
 	"fmt"
 	"os"
 	"slices"
@@ -39,9 +40,21 @@ func main() {
 	os.Exit(commands[i].run(os.Args[2:]))
 }
 
+// order lists commands for help: setup first, everyday tools next, internals last.
+var order = []string{"init", "install", "import", "doctor", "search", "show", "save", "stats", "shadow-report",
+	"scrub", "embed", "watch", "bench", "mcp", "hook", "daemon"}
+
 func usage() {
-	fmt.Fprintln(os.Stderr, "usage: amem <command> [flags]\n\ncommands:")
-	for _, c := range commands {
+	fmt.Fprintln(os.Stderr, "usage: amem <command> [flags]   (amem <command> -h for its flags)\n\ncommands:")
+	sorted := slices.Clone(commands)
+	rank := func(name string) int {
+		if i := slices.Index(order, name); i >= 0 {
+			return i
+		}
+		return len(order)
+	}
+	slices.SortStableFunc(sorted, func(a, b command) int { return cmp.Compare(rank(a.name), rank(b.name)) })
+	for _, c := range sorted {
 		fmt.Fprintf(os.Stderr, "  %-14s %s\n", c.name, c.summary)
 	}
 }
