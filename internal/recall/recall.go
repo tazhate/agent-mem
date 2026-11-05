@@ -201,6 +201,11 @@ func (e *Engine) Search(ctx context.Context, text string, scope store.Scope, lim
 	}
 	out := make([]Scored, 0, len(mems))
 	for _, m := range mems {
+		// Vector hits come from an index that may lag behind supersede/private changes.
+		if m.SupersededBy != 0 || m.Private || (!scope.All && m.ProjectID != scope.ProjectID && m.ProjectID != 0) ||
+			(len(scope.Types) > 0 && !slices.Contains(scope.Types, m.Type)) {
+			continue
+		}
 		have := map[string]bool{}
 		for _, t := range stem.Tokens(m.Title + " " + m.Body + " " + strings.Join(m.Facts, " ") + " " + strings.Join(m.Files, " ") + " " + m.Type) {
 			have[stem.Word(t)] = true
