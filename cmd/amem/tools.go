@@ -144,3 +144,5 @@ func clipStr(s string, n int) string {
 	}
 	return s
 }
+
+func jsonUnmarshal(b []byte, v any) error { return json.Unmarshal(b, v) }

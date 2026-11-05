@@ -151,9 +151,12 @@ CREATE TABLE IF NOT EXISTS vectors (
 
 -- Read position of transcript files followed by `amem watch`.
 CREATE TABLE IF NOT EXISTS watch_state (
-	path   TEXT PRIMARY KEY,
-	offset INTEGER NOT NULL,
-	size   INTEGER NOT NULL
+	path     TEXT PRIMARY KEY,
+	offset   INTEGER NOT NULL,
+	size     INTEGER NOT NULL,
+	session  TEXT NOT NULL DEFAULT '',
+	cwd      TEXT NOT NULL DEFAULT '',
+	subagent INTEGER NOT NULL DEFAULT 0
 );
 
 -- Document frequency per stem, for IDF-weighted relevance in recall.
