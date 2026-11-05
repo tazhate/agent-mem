@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"syscall"
 
 	"github.com/tazhate/agent-mem/internal/config"
@@ -46,9 +47,18 @@ func cmdDaemon(args []string) int {
 
 	srv := daemon.New(cfg, st, log)
 	attachWorkers(cfg, srv, log)
-	srv.HTTP = mcpserver.HTTPHandler(func(op string, params, out any) error {
-		return srv.CallLocal(context.Background(), op, params, out)
-	})
+	if cfg.Daemon.HTTPAddr != "" {
+		if err := mcpserver.CheckLoopback(cfg.Daemon.HTTPAddr); err != nil {
+			return fail("%v", err)
+		}
+		token, err := mcpserver.HTTPToken(filepath.Join(cfg.DataDir, "http.token"))
+		if err != nil {
+			return fail("http token: %v", err)
+		}
+		srv.HTTP = mcpserver.HTTPHandler(func(op string, params, out any) error {
+			return srv.CallLocal(context.Background(), op, params, out)
+		}, token)
+	}
 
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()

@@ -134,7 +134,7 @@ func TestPrivacy(t *testing.T) {
 		Prompt: "<private>my password is hunter2hunter2</private>"}
 	s.ingest(t.Context(), p, true)
 	tool := &event.Event{Runtime: "claude-code", NativeSession: "p", Cwd: repo, Kind: event.ToolPost, ID: event.NewID(),
-		Tool: &event.Tool{Name: "Bash", Input: json.RawMessage(`{"command":"export GITHUB_TOKEN=ghp_abcdefghijklmnopqrstuvwxyz0123456789"}`), Output: "ok"}}
+		Tool: &event.Tool{Name: "Bash", Input: json.RawMessage(`{"command":"export GITHUB_TOKEN=` + "ghp_" + `abcdefghijklmnopqrstuvwxyz0123456789"}`), Output: "ok"}}
 	s.ingest(t.Context(), tool, true)
 	var dump string
 	s.st.DB().QueryRow(`SELECT group_concat(coalesce(input,'') || coalesce(output,'')) FROM events`).Scan(&dump)
@@ -144,3 +144,95 @@ func TestPrivacy(t *testing.T) {
 }
 
 func itoa(n int64) string { b, _ := json.Marshal(n); return string(b) }
+
+func TestPrivateTurnAcrossBatches(t *testing.T) {
+	s, repo := newServer(t, "on")
+	ctx := t.Context()
+	mk := func(kind event.Kind) *event.Event {
+		return &event.Event{Runtime: "claude-code", NativeSession: "pv", Cwd: repo, Kind: kind, ID: event.NewID()}
+	}
+	pub := mk(event.Prompt)
+	pub.Prompt = "public question about the build"
+	s.ingest(ctx, pub, true)
+	priv := mk(event.Prompt)
+	priv.Prompt = "<private>customer data</private>"
+	s.ingest(ctx, priv, true)
+	// Tool events arrive in separate deliveries, long after the prompt.
+	for range 3 {
+		tool := mk(event.ToolPost)
+		tool.Tool = &event.Tool{Name: "Bash", Input: json.RawMessage(`{"command":"cat customers.csv"}`), Output: "s3cret-row"}
+		s.ingest(ctx, tool, true)
+	}
+	end := mk(event.TurnEnd)
+	end.LastAssistant = "the customer owes 4200"
+	s.ingest(ctx, end, true)
+	var dump string
+	s.st.DB().QueryRow(`SELECT group_concat(coalesce(input,'') || coalesce(output,''), '|') FROM events`).Scan(&dump)
+	for _, leak := range []string{"customer data", "s3cret-row", "owes 4200", "customers.csv"} {
+		if strings.Contains(dump, leak) {
+			t.Fatalf("private turn content stored: %q in %s", leak, dump)
+		}
+	}
+	last, _ := s.st.LastAssistant(ctx, "claude-code:pv")
+	if strings.Contains(last, "4200") {
+		t.Fatal("summary input would contain the private answer")
+	}
+	// The next public prompt ends the private state.
+	pub2 := mk(event.Prompt)
+	pub2.Prompt = "back to the build"
+	s.ingest(ctx, pub2, true)
+	tool := mk(event.ToolPost)
+	tool.Tool = &event.Tool{Name: "Bash", Input: json.RawMessage(`{"command":"make"}`), Output: "ok-visible"}
+	s.ingest(ctx, tool, true)
+	s.st.DB().QueryRow(`SELECT group_concat(coalesce(output,''), '|') FROM events`).Scan(&dump)
+	if !strings.Contains(dump, "ok-visible") {
+		t.Fatal("public turn after a private one was not stored")
+	}
+}
+
+func TestEscapedPrivateInToolInput(t *testing.T) {
+	s, repo := newServer(t, "on")
+	// What json.Marshal makes of <private> inside a RawMessage.
+	in := json.RawMessage(`{"command":"echo <private>top-secret</private> done"}`)
+	e := &event.Event{Runtime: "claude-code", NativeSession: "esc", Cwd: repo, Kind: event.ToolPost, ID: event.NewID(),
+		Tool: &event.Tool{Name: "Bash", Input: in, Output: "x"}}
+	s.ingest(t.Context(), e, true)
+	var stored string
+	s.st.DB().QueryRow(`SELECT input FROM events WHERE tool = 'Bash'`).Scan(&stored)
+	if strings.Contains(stored, "top-secret") || !strings.Contains(stored, "done") {
+		t.Fatalf("stored input: %s", stored)
+	}
+}
+
+func TestPrivateMemoriesNotServed(t *testing.T) {
+	s, repo := newServer(t, "on")
+	ctx := t.Context()
+	pid, _, _ := s.projectFor(ctx, repo)
+	id, _, _ := s.st.InsertMemory(ctx, &store.Memory{ProjectID: pid, SessionID: "claude-code:x", Type: "discovery", Title: "sensitive thing", Private: true})
+	var got []*store.Memory
+	if err := s.CallLocal(ctx, OpGet, GetParams{IDs: []int64{id}}, &got); err != nil || len(got) != 0 {
+		t.Fatalf("memory_get served a private memory: %v %d", err, len(got))
+	}
+	if err := s.CallLocal(ctx, OpGet, GetParams{IDs: []int64{id}, IncludePrivate: true}, &got); err != nil || len(got) != 1 {
+		t.Fatalf("CLI path lost private memory: %v %d", err, len(got))
+	}
+	if m, _ := s.st.SessionMemories(ctx, "claude-code:x", 10); len(m) != 0 {
+		t.Fatal("SessionMemories returned a private memory")
+	}
+}
+
+func TestSaveAndWorkStateRedacted(t *testing.T) {
+	s, repo := newServer(t, "on")
+	ctx := t.Context()
+	var out map[string]any
+	if err := s.CallLocal(ctx, OpSave, SaveParams{Text: "deploy notes", Title: "token ghp_" + "abcdefghijklmnopqrstuvwxyz0123456789", Cwd: repo}, &out); err != nil {
+		t.Fatal(err)
+	}
+	var lists []store.WorkList
+	s.CallLocal(ctx, OpWorkW, WorkParams{List: "ops", Fields: map[string]any{"task": "rotate", "note": "password=hunter2hunter2 <private>x</private>"}, Cwd: repo}, &lists)
+	var dump string
+	s.st.DB().QueryRow(`SELECT (SELECT group_concat(title) FROM memories) || (SELECT group_concat(fields) FROM work_entries)`).Scan(&dump)
+	if strings.Contains(dump, "ghp_abcdef") || strings.Contains(dump, "hunter2") || strings.Contains(dump, "<private>") {
+		t.Fatalf("unredacted: %s", dump)
+	}
+}

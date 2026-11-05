@@ -3,7 +3,9 @@ package store
 import (
 	"database/sql"
 	"path/filepath"
+	"strings"
 	"testing"
+	"time"
 
 	"github.com/tazhate/agent-mem/internal/stem"
 )
@@ -92,5 +94,69 @@ func TestPruneKeepsPrompts(t *testing.T) {
 	s.DB().QueryRow(`SELECT count(*) FROM events WHERE kind = 'prompt'`).Scan(&left)
 	if err != nil || n != 1 || left != 1 {
 		t.Fatalf("pruned %d, prompts left %d, err %v", n, left, err)
+	}
+}
+
+func TestImmediateTxWaitsInsteadOfBusy(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "c.db")
+	a, err := Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer a.Close()
+	b, err := Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer b.Close()
+	ctx := t.Context()
+	release := make(chan struct{})
+	held := make(chan struct{})
+	go a.Write(ctx, func(tx *sql.Tx) error {
+		tx.ExecContext(ctx, `INSERT INTO meta(key, value) VALUES ('a', '1')`)
+		close(held)
+		<-release
+		return nil
+	})
+	<-held
+	go func() { time.Sleep(300 * time.Millisecond); close(release) }()
+	// A read-then-write transaction in a second connection must wait for the lock, not fail.
+	err = b.Write(ctx, func(tx *sql.Tx) error {
+		var n int
+		if err := tx.QueryRowContext(ctx, `SELECT count(*) FROM events`).Scan(&n); err != nil {
+			return err
+		}
+		_, err := tx.ExecContext(ctx, `INSERT INTO meta(key, value) VALUES ('b', '1')`)
+		return err
+	})
+	if err != nil {
+		t.Fatalf("second writer failed instead of waiting: %v", err)
+	}
+}
+
+func TestScrub(t *testing.T) {
+	s := open(t)
+	ctx := t.Context()
+	pid, _ := s.EnsureProject(ctx, "k", "n", "")
+	s.InsertMemory(ctx, &Memory{ProjectID: pid, Type: "gotcha", Title: "db url postgres://u:hunter2pw@h/db", Body: "plain"})
+	s.Write(ctx, func(tx *sql.Tx) error {
+		s.InsertEvent(ctx, tx, EventRow{SessionID: "x", Kind: "prompt", Input: "use postgres://u:hunter2pw@h/db", TS: 1})
+		return nil
+	})
+	clean := func(v string) string { return strings.ReplaceAll(v, "hunter2pw", "[REDACTED]") }
+	rep, err := s.Scrub(ctx, clean, true)
+	if err != nil || rep.Memories != 1 || rep.Events != 1 {
+		t.Fatalf("dry run: %+v %v", rep, err)
+	}
+	if _, err := s.Scrub(ctx, clean, false); err != nil {
+		t.Fatal(err)
+	}
+	var dump string
+	s.DB().QueryRow(`SELECT (SELECT group_concat(title) FROM memories) || (SELECT group_concat(input) FROM events)`).Scan(&dump)
+	if strings.Contains(dump, "hunter2pw") {
+		t.Fatalf("not scrubbed: %s", dump)
+	}
+	if hits, _ := s.SearchFTS(ctx, []string{"redact"}, Scope{ProjectID: pid}, 5); len(hits) != 1 {
+		t.Fatal("FTS not reindexed after scrub")
 	}
 }

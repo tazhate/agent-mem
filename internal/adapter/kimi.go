@@ -47,3 +47,7 @@ func (kimi) Render(ev *event.Event, hookArg string, context string) []byte {
 	}
 	return []byte(truncateContext(context))
 }
+
+func (kimi) CanInject(ev *event.Event, hookArg string) bool {
+	return kimiContextEvents[firstNonEmpty(hookArg, hookNameFor(kimiKinds, ev.Kind))]
+}

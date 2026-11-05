@@ -60,3 +60,6 @@ func (opencode) Render(ev *event.Event, hookArg string, context string) []byte {
 	b, _ := json.Marshal(map[string]string{"context": truncateContext(context)})
 	return b
 }
+
+// CanInject: the plugin queues context for the next system prompt for any event it sends.
+func (opencode) CanInject(*event.Event, string) bool { return true }

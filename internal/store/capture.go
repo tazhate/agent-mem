@@ -102,14 +102,14 @@ func (s *Store) HasEvent(ctx context.Context, tx *sql.Tx, id string) (bool, erro
 	return n > 0, err
 }
 
-// TouchSession creates the session on first sight and returns its current turn number.
-// A prompt event opens a new turn.
-func (s *Store) TouchSession(ctx context.Context, tx *sql.Tx, id, runtime, native string, projectID int64, cwd, model string, newTurn bool, ts int64) (int, error) {
+// TouchSession creates the session on first sight and returns its current turn number and the
+// turn marked private (-1 if none). A prompt event opens a new turn.
+func (s *Store) TouchSession(ctx context.Context, tx *sql.Tx, id, runtime, native string, projectID int64, cwd, model string, newTurn bool, ts int64) (int, int, error) {
 	inc := 0
 	if newTurn {
 		inc = 1
 	}
-	var turn int
+	var turn, priv int
 	err := tx.QueryRowContext(ctx, `INSERT INTO sessions(id, runtime, native_id, project_id, cwd, model, turn, started_at, last_event_at)
 		VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?8)
 		ON CONFLICT(id) DO UPDATE SET
@@ -118,8 +118,24 @@ func (s *Store) TouchSession(ctx context.Context, tx *sql.Tx, id, runtime, nativ
 			project_id = coalesce(sessions.project_id, excluded.project_id),
 			cwd = coalesce(sessions.cwd, excluded.cwd),
 			model = coalesce(excluded.model, sessions.model)
-		RETURNING turn`, id, runtime, native, projectID, nullStr(cwd), nullStr(model), inc, ts).Scan(&turn)
-	return turn, err
+		RETURNING turn, private_turn`, id, runtime, native, projectID, nullStr(cwd), nullStr(model), inc, ts).Scan(&turn, &priv)
+	return turn, priv, err
+}
+
+// SetPrivateTurn records which turn of a session is private (-1 clears it).
+func (s *Store) SetPrivateTurn(ctx context.Context, tx *sql.Tx, id string, turn int) error {
+	_, err := tx.ExecContext(ctx, `UPDATE sessions SET private_turn = ? WHERE id = ?`, turn, id)
+	return err
+}
+
+// SeenEvent is a read-only duplicate check outside any write transaction.
+func (s *Store) SeenEvent(ctx context.Context, id string) (bool, error) {
+	if id == "" {
+		return false, nil
+	}
+	var n int
+	err := s.db.QueryRowContext(ctx, `SELECT count(*) FROM events WHERE origin = 'hook' AND origin_id = ?`, id).Scan(&n)
+	return n > 0, err
 }
 
 func (s *Store) EndSession(ctx context.Context, tx *sql.Tx, id string, ts int64) error {

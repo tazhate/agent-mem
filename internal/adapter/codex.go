@@ -50,3 +50,7 @@ func (codex) Render(ev *event.Event, hookArg string, context string) []byte {
 	}
 	return hookSpecific(name, context)
 }
+
+func (codex) CanInject(ev *event.Event, hookArg string) bool {
+	return codexContextEvents[firstNonEmpty(hookArg, hookNameFor(codexKinds, ev.Kind))]
+}

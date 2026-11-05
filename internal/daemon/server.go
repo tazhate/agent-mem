@@ -2,6 +2,7 @@ package daemon
 
 import (
 	"bufio"
+	"bytes"
 	"context"
 	"database/sql"
 	"encoding/json"
@@ -129,7 +130,7 @@ func (s *Server) Run(ctx context.Context, foreground bool) error {
 				return
 			case <-t.C:
 			}
-			if _, err := os.Stat(s.cfg.SpoolPath()); err == nil {
+			if SpoolPending(s.cfg.SpoolPath()) {
 				s.drainSpool(ctx)
 			}
 		}
@@ -304,25 +305,49 @@ func (s *Server) ingest(ctx context.Context, ev *event.Event, live bool) (string
 	if err != nil {
 		return "", err
 	}
-	s.clean(ev)
+	// Cheap duplicate check before the expensive cleaning (redelivery after a hook timeout).
+	if seen, err := s.st.SeenEvent(ctx, ev.ID); err == nil && seen {
+		return "", nil
+	}
+	privatePrompt := s.clean(ev)
 
 	isOwn := ev.Tool != nil && ownTool.MatchString(ev.Tool.Name)
 	skip := ev.Tool != nil && (isOwn || slices.Contains(s.cfg.Capture.SkipTools, ev.Tool.Name))
 	store := !skip && ev.Kind != event.ToolPre
 
-	dup := false
+	dup, inPrivate := false, false
 	if err := s.st.Write(ctx, func(tx *sql.Tx) error {
 		if seen, err := s.st.HasEvent(ctx, tx, ev.ID); err != nil || seen {
 			dup = seen
 			return err
 		}
-		turn, err := s.st.TouchSession(ctx, tx, sid, ev.Runtime, ev.NativeSession, pid, ev.Cwd, ev.Model, ev.Kind == event.Prompt, ev.TS)
+		turn, privTurn, err := s.st.TouchSession(ctx, tx, sid, ev.Runtime, ev.NativeSession, pid, ev.Cwd, ev.Model, ev.Kind == event.Prompt, ev.TS)
 		if err != nil {
 			return err
 		}
+		if ev.Kind == event.Prompt {
+			// The whole turn of a fully private prompt stays out of storage, however the
+			// observer later slices batches.
+			privTurn = -1
+			if privatePrompt {
+				privTurn = turn
+			}
+			if err := s.st.SetPrivateTurn(ctx, tx, sid, privTurn); err != nil {
+				return err
+			}
+		}
+		inPrivate = ev.Kind != event.Prompt && privTurn >= 0 && turn == privTurn
 		if ev.Kind == event.SessionEnd {
 			if err := s.st.EndSession(ctx, tx, sid, ev.TS); err != nil {
 				return err
+			}
+		}
+		if inPrivate {
+			switch ev.Kind {
+			case event.TurnEnd, event.SubagentStop:
+				ev.LastAssistant = "" // keep the turn boundary, drop the private answer
+			default:
+				store = false
 			}
 		}
 		if !store {
@@ -337,7 +362,9 @@ func (s *Server) ingest(ctx context.Context, ev *event.Event, live bool) (string
 		return "", nil
 	}
 
-	s.feedback(ctx, ev, sid, isOwn)
+	if !inPrivate {
+		s.feedback(ctx, ev, sid, isOwn)
+	}
 
 	if store {
 		for _, w := range s.workers {
@@ -396,40 +423,75 @@ func toRow(ev *event.Event, sid string, turn int) store.EventRow {
 	return row
 }
 
-// clean redacts secrets and private blocks and trims oversized fields before storage.
-func (s *Server) clean(ev *event.Event) {
-	limit := s.cfg.Capture.MaxFieldChars
-	fix := func(v string) string {
-		if s.cfg.Capture.Redact {
-			v = s.red.Clean(v)
-		} else {
-			v = redact.StripTags(v)
-		}
-		return Elide(v, limit)
-	}
+// clean trims oversized fields, then strips private blocks and masks secrets. It reports
+// whether the prompt was entirely private. Trimming first keeps redaction cost bounded on
+// multi-megabyte tool outputs.
+func (s *Server) clean(ev *event.Event) (privatePrompt bool) {
+	fix := func(v string) string { return CleanText(s.red, s.cfg.Capture.Redact, v, s.cfg.Capture.MaxFieldChars) }
 	if ev.Prompt != "" {
 		if redact.IsFullyPrivate(ev.Prompt) {
-			ev.Prompt = ""
+			ev.Prompt, privatePrompt = "", true
 		} else {
 			ev.Prompt = fix(ev.Prompt)
 		}
+	}
+	if ev.Kind == event.TurnEnd && ev.LastAssistant == "" && ev.TranscriptPath != "" {
+		ev.LastAssistant = adapter.LastAssistantFromTranscript(ev.TranscriptPath)
 	}
 	ev.LastAssistant = fix(ev.LastAssistant)
 	if t := ev.Tool; t != nil {
 		t.Output = fix(t.Output)
 		t.Error = fix(t.Error)
-		if len(t.Input) > 0 {
-			in := fix(string(t.Input))
-			if json.Valid([]byte(in)) {
-				t.Input = json.RawMessage(in)
-			} else {
-				t.Input, _ = json.Marshal(in)
+		t.Input = CleanJSON(t.Input, fix)
+	}
+	return privatePrompt
+}
+
+// CleanText is the capture cleaning used by the daemon and by hooks before spooling.
+func CleanText(r *redact.Redactor, doRedact bool, v string, limit int) string {
+	v = Elide(v, limit)
+	if doRedact {
+		return r.Clean(v)
+	}
+	return redact.StripTags(v)
+}
+
+// CleanJSON applies fix to every string inside a JSON value. Strings are decoded first, so
+// escaped forms like \u003cprivate\u003e are seen as <private>; output keeps < and > literal.
+func CleanJSON(raw json.RawMessage, fix func(string) string) json.RawMessage {
+	if len(raw) == 0 {
+		return raw
+	}
+	var v any
+	dec := json.NewDecoder(bytes.NewReader(raw))
+	dec.UseNumber()
+	if err := dec.Decode(&v); err != nil {
+		b, _ := json.Marshal(fix(string(raw)))
+		return b
+	}
+	var walk func(any) any
+	walk = func(x any) any {
+		switch t := x.(type) {
+		case string:
+			return fix(t)
+		case map[string]any:
+			for k, val := range t {
+				t[k] = walk(val)
+			}
+		case []any:
+			for i, val := range t {
+				t[i] = walk(val)
 			}
 		}
+		return x
 	}
-	if ev.Kind == event.TurnEnd && ev.LastAssistant == "" && ev.TranscriptPath != "" {
-		ev.LastAssistant = fix(adapter.LastAssistantFromTranscript(ev.TranscriptPath))
+	var out bytes.Buffer
+	enc := json.NewEncoder(&out)
+	enc.SetEscapeHTML(false)
+	if err := enc.Encode(walk(v)); err != nil {
+		return raw
 	}
+	return bytes.TrimRight(out.Bytes(), "\n")
 }
 
 var citeRe = regexp.MustCompile(`#(\d{1,9})\b`)

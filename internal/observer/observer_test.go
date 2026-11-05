@@ -94,3 +94,50 @@ func TestObserveTurn(t *testing.T) {
 }
 
 func itoa(n int64) string { b, _ := json.Marshal(n); return string(b) }
+
+type flaky struct {
+	calls int
+}
+
+func (f *flaky) Name() string { return "flaky" }
+func (f *flaky) Complete(ctx context.Context, r provider.Request) (json.RawMessage, error) {
+	f.calls++
+	if f.calls == 2 {
+		return nil, context.DeadlineExceeded
+	}
+	return json.RawMessage(`{"memories":[{"type":"change","title":"chunk ` + itoa(int64(f.calls)) + `","body":"b","facts":[],"files":[],"global":false,"replaces":[]}]}`), nil
+}
+
+func TestChunkFailureDoesNotResendStoredChunks(t *testing.T) {
+	ctx := t.Context()
+	st, _ := store.Open(filepath.Join(t.TempDir(), "t.db"))
+	defer st.Close()
+	pid, _ := st.EnsureProject(ctx, "/r/.git", "r", "/r")
+	sid := "claude-code:c"
+	now := time.Now().UnixMilli()
+	st.Write(ctx, func(tx *sql.Tx) error {
+		st.TouchSession(ctx, tx, sid, "claude-code", "c", pid, "/r", "", true, now)
+		for turn := 1; turn <= 2; turn++ {
+			st.InsertEvent(ctx, tx, store.EventRow{SessionID: sid, Turn: turn, Kind: "prompt", Input: strings.Repeat("x", 300), TS: now})
+			st.InsertEvent(ctx, tx, store.EventRow{SessionID: sid, Turn: turn, Kind: "tool_post", Tool: "Bash", Input: `{"command":"make"}`, Output: strings.Repeat("y", 300), TS: now})
+			st.InsertEvent(ctx, tx, store.EventRow{SessionID: sid, Turn: turn, Kind: "turn_end", Output: "done", TS: now})
+		}
+		return nil
+	})
+	cfg := config.Default().Observer
+	cfg.BatchChars = 500 // one turn per chunk
+	f := &flaky{}
+	o := New(st, cfg, recall.New(st, config.Default().Recall, nil), slog.New(slog.NewTextHandler(io.Discard, nil)))
+	o.SetProvider(f)
+	o.process(ctx, sid, false) // chunk 1 ok, chunk 2 fails
+	pending, _ := st.PendingEvents(ctx, sid, 100)
+	if len(pending) != 3 || pending[0].Turn != 2 {
+		t.Fatalf("after partial failure want only turn 2 pending, got %d", len(pending))
+	}
+	delete(o.backoff, sid)
+	o.process(ctx, sid, false) // retry sends only turn 2
+	mems, _ := st.SessionMemories(ctx, sid, 10)
+	if len(mems) != 2 || f.calls != 3 {
+		t.Fatalf("memories=%d calls=%d (turn 1 must not be resent)", len(mems), f.calls)
+	}
+}
