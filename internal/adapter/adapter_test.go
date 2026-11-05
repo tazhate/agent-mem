@@ -136,3 +136,15 @@ func TestCanInject(t *testing.T) {
 		t.Fatal("claude-code capability")
 	}
 }
+
+func TestGeminiDocumentedFields(t *testing.T) {
+	g, _ := Get("gemini")
+	ev, err := g.Parse("", []byte(`{"session_id":"g","cwd":"/g","hook_event_name":"AfterAgent","prompt":"q","prompt_response":"final answer"}`), env(nil))
+	if err != nil || ev.Kind != event.TurnEnd || ev.LastAssistant != "final answer" {
+		t.Fatalf("AfterAgent: %v %+v", err, ev)
+	}
+	ev, err = g.Parse("", []byte(`{"session_id":"g","cwd":"/g","hook_event_name":"AfterTool","tool_name":"run_shell_command","tool_input":{"command":"x"},"tool_response":{"llmContent":"boom text","returnDisplay":"boom","error":{"message":"exit 1"}}}`), env(nil))
+	if err != nil || ev.Kind != event.ToolFail || ev.Tool.Output != "boom text" || !strings.Contains(ev.Tool.Error, "exit 1") {
+		t.Fatalf("AfterTool failure: %v %+v %+v", err, ev, ev.Tool)
+	}
+}

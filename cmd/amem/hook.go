@@ -58,8 +58,7 @@ func cmdHook(args []string) (code int) {
 	cfg, err := config.Load()
 	if err != nil {
 		debugf("%v", err)
-		cfg = config.Default()
-		cfg.DataDir = config.Home()
+		cfg = config.Fallback(err)
 	}
 	timeout := 400 * time.Millisecond
 	if ev.Kind.WantsContext() {

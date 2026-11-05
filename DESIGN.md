@@ -43,8 +43,8 @@ On top of that, recall is passive. At session start the 50 most recent records a
  runtime (Claude Code / Codex / Gemini CLI / Cursor / OpenCode / ...)
    |  hooks: JSON on stdin            |  MCP (stdio or HTTP)
    v                                  v
- amem hook <event>               amem mcp  (thin proxy)
-   |  unix socket, 30 ms timeout      |
+ amem hook <runtime> [event]     amem mcp  (thin proxy)
+   |  unix socket, 0.4/1.5 s deadline |
    |  no daemon -> spool.jsonl + spawn |
    v                                  v
  +--------------------------------------------------+
@@ -277,7 +277,7 @@ Budgets are checked by a CI benchmark on a synthetic database of the same size.
 ## Stack
 
 - Go 1.26+, one module, no cgo in the main build.
-- SQLite: `modernc.org/sqlite` or `github.com/ncruces/go-sqlite3`. Both are cgo-free and have FTS5; the choice is made by benchmark on the imported database.
+- SQLite: `modernc.org/sqlite` (cgo-free, FTS5 built in), WAL, IMMEDIATE write transactions.
 - MCP: `github.com/modelcontextprotocol/go-sdk`.
 - Stemming: `github.com/kljensen/snowball`.
 - Vectors: a custom flat int8 scan, no dependencies.
@@ -292,9 +292,15 @@ internal/recall/     FTS, vectors, scoring, budgets
 internal/observer/   batching, prefilter, prompt, JSON schema
 internal/provider/   openai, anthropic, exec
 internal/embed/      none, openai, local (build tag)
-internal/daemon/     socket, spool, lifecycle
-internal/mcpserver/  tools
+internal/daemon/     socket, spool, lifecycle, API
+internal/mcpserver/  tools, HTTP with bearer token
 internal/importer/   claudemem
+internal/config/     TOML, validation, secret references
+internal/project/    git common dir -> project
+internal/redact/     private tags, secret patterns
+internal/stem/       snowball ru/en, ё folding
+internal/install/    runtime config writers
+internal/watch/      transcript followers
 ```
 
 ## Stages
@@ -329,4 +335,15 @@ What changed compared to the design above:
 - The daemon version includes the git revision: a new binary replaces the running daemon by itself.
 - Kimi Code was added: `[[hooks]]` in `~/.kimi-code/config.toml`, context through stdout.
 
-Measurements on the imported database (108k records): capture p99 13 ms, recall hook p99 40 ms, search p99 18 ms, import 2.5 minutes.
+Measurements on the imported database (108k records): capture p99 13 ms, recall hook p99 40 ms, search p99 18 ms, import 1.5-2.5 minutes.
+
+## Review fixes (5 Nov 2026)
+
+A full review (three internal passes plus Codex) led to these changes after v1:
+
+- Privacy: a fully `<private>` prompt makes its whole turn private in the session, so its tool calls and answer are never stored; tool input is cleaned after JSON decoding (escaped `<private>` tags were slipping through); hooks redact before writing the spool; private memories are never served to agents; the importer redacts, and `amem scrub` cleans existing data; HTTP MCP needs a bearer token and a loopback address.
+- Durability: IMMEDIATE transactions, spool recovery of abandoned drain files, bounded spool locking, per-chunk observer commits, deterministic watcher event ids, persisted pending tool calls.
+- Behavior: adapters declare `CanInject`, so memory counts as shown only when the runtime can deliver it and the hook received it; the daemon restarts only for a rebuilt copy of its own binary; config is validated and a broken file falls back to defaults; `ё` is folded to `е` with an automatic one-time FTS rebuild; memory file lookups use an indexed `base` column instead of `LIKE`.
+- Providers: per-provider timeouts in a chain, process-group kill for CLI providers, `max_completion_tokens` for OpenAI, schema downgrade only on schema errors, backoff and give-up for failing batches and summaries.
+- Runtimes: Gemini `prompt_response` and nested tool errors, Gemini MCP tool names, OpenCode context kept for the whole turn and assistant text from message events, recall after compaction.
+- Installer: symlinks preserved, foreign `amem` MCP entries left alone, no files created on uninstall, change detection between read and write, strict shell and TOML quoting.

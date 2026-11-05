@@ -12,9 +12,12 @@ import (
 	"github.com/kljensen/snowball/russian"
 )
 
+// fold maps "ё" to "е": Russian text uses both spellings for the same word.
+var fold = strings.NewReplacer("ё", "е", "Ё", "е")
+
 // Tokens splits text into lowercase words of letters and digits.
 func Tokens(s string) []string {
-	return strings.FieldsFunc(strings.ToLower(s), func(r rune) bool {
+	return strings.FieldsFunc(fold.Replace(strings.ToLower(s)), func(r rune) bool {
 		return !unicode.IsLetter(r) && !unicode.IsDigit(r)
 	})
 }

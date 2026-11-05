@@ -25,11 +25,15 @@ func cmdDaemon(args []string) int {
 	foreground := fs.Bool("foreground", false, "never exit on idle (for systemd)")
 	fs.Parse(args)
 
+	log := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelInfo}))
 	cfg, err := config.Load()
 	if err != nil {
-		return fail("%v", err)
+		// Same fallback as the hooks: refusing to start would only grow the spool forever.
+		cfg = config.Fallback(err)
 	}
-	log := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelInfo}))
+	for _, w := range cfg.Warnings {
+		log.Warn("config", "problem", w)
+	}
 	lock, err := daemon.Lock(cfg)
 	if errors.Is(err, daemon.ErrRunning) {
 		return 0

@@ -141,3 +141,34 @@ func TestChunkFailureDoesNotResendStoredChunks(t *testing.T) {
 		t.Fatalf("memories=%d calls=%d (turn 1 must not be resent)", len(mems), f.calls)
 	}
 }
+
+type broken struct{ calls int }
+
+func (b *broken) Name() string { return "broken" }
+func (b *broken) Complete(context.Context, provider.Request) (json.RawMessage, error) {
+	b.calls++
+	return json.RawMessage(`not json`), nil
+}
+
+func TestSummaryGivesUp(t *testing.T) {
+	ctx := t.Context()
+	st, _ := store.Open(filepath.Join(t.TempDir(), "t.db"))
+	defer st.Close()
+	pid, _ := st.EnsureProject(ctx, "/r/.git", "r", "/r")
+	sid := "claude-code:z"
+	st.Write(ctx, func(tx *sql.Tx) error {
+		st.TouchSession(ctx, tx, sid, "claude-code", "z", pid, "/r", "", true, 1)
+		st.InsertEvent(ctx, tx, store.EventRow{SessionID: sid, Turn: 1, Kind: "prompt", Input: "do it", TS: 1})
+		return st.EndSession(ctx, tx, sid, 2)
+	})
+	b := &broken{}
+	o := New(st, config.Default().Observer, recall.New(st, config.Default().Recall, nil), slog.New(slog.NewTextHandler(io.Discard, nil)))
+	o.SetProvider(b)
+	for range 20 {
+		o.scan(ctx)                       // the periodic path, which only picks unsummarized sessions
+		delete(o.backoff, "summary:"+sid) // simulate time passing
+	}
+	if b.calls != maxFailures {
+		t.Fatalf("summary attempts = %d, want %d then stop", b.calls, maxFailures)
+	}
+}

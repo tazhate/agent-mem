@@ -13,6 +13,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"time"
 )
 
@@ -131,11 +132,22 @@ func (o *openai) Complete(ctx context.Context, req Request) (json.RawMessage, er
 			},
 		},
 	}
+	// max_tokens is rejected by GPT-5 and o-series models; max_completion_tokens is the
+	// current name and OpenAI-compatible servers that predate it ignore unknown fields.
 	if n := cmp.Or(req.MaxTokens, o.maxTokens); n > 0 {
-		body["max_tokens"] = n
+		body["max_completion_tokens"] = n
 	}
 	out, status, err := post(ctx, o.name, url, headers, body)
-	if err != nil && status == http.StatusBadRequest {
+	if err != nil && status == http.StatusBadRequest && mentions(out, "max_completion_tokens") {
+		if n, ok := body["max_completion_tokens"]; ok {
+			delete(body, "max_completion_tokens")
+			body["max_tokens"] = n
+			out, status, err = post(ctx, o.name, url, headers, body)
+		}
+	}
+	// Downgrade the schema only when the server complains about it, not on any 400
+	// (context length, bad model name...).
+	if err != nil && status == http.StatusBadRequest && mentions(out, "response_format", "json_schema", "strict") {
 		// Many local servers only know json_object (or nothing): put the schema in the prompt.
 		body["response_format"] = map[string]any{"type": "json_object"}
 		body["messages"] = []map[string]string{
@@ -143,7 +155,7 @@ func (o *openai) Complete(ctx context.Context, req Request) (json.RawMessage, er
 			{"role": "user", "content": req.User},
 		}
 		out, status, err = post(ctx, o.name, url, headers, body)
-		if err != nil && status == http.StatusBadRequest {
+		if err != nil && status == http.StatusBadRequest && mentions(out, "response_format", "json_object") {
 			delete(body, "response_format")
 			out, _, err = post(ctx, o.name, url, headers, body)
 		}
@@ -226,6 +238,11 @@ func (e *execProvider) Complete(ctx context.Context, req Request) (json.RawMessa
 	}
 	cmd := exec.CommandContext(ctx, args[0], args[1:]...)
 	cmd.Dir = dir
+	// CLIs spawn helpers that inherit stdout; kill the whole process group on timeout and stop
+	// waiting for pipes shortly after, or one hung grandchild blocks the observer forever.
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	cmd.Cancel = func() error { return syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL) }
+	cmd.WaitDelay = 5 * time.Second
 	cmd.Stdin = strings.NewReader(prompt)
 	// The observer's own CLI session must not trigger amem hooks again.
 	cmd.Env = append(os.Environ(), "AMEM_DISABLE=1")
@@ -277,3 +294,13 @@ var Presets = map[string][]string{
 
 // PresetModels are cheap, fast defaults per CLI.
 var PresetModels = map[string]string{"claude": "haiku", "codex": "", "gemini": "gemini-2.5-flash"}
+
+func mentions(body []byte, words ...string) bool {
+	low := strings.ToLower(string(body))
+	for _, w := range words {
+		if strings.Contains(low, w) {
+			return true
+		}
+	}
+	return false
+}

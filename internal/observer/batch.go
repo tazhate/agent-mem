@@ -11,6 +11,9 @@ import (
 	"github.com/tazhate/agent-mem/internal/store"
 )
 
+// maxSteps caps the tool calls rendered for one turn.
+const maxSteps = 120
+
 type turn struct {
 	n         int
 	prompt    string
@@ -85,6 +88,13 @@ func buildTurns(evs []store.EventRow) []turn {
 	for _, t := range out {
 		if len(t.steps) == 0 && t.assistant == "" {
 			continue
+		}
+		// A turn with hundreds of tool calls would not fit any context window: keep its start
+		// and its end, where the setup and the outcome are.
+		if n := len(t.steps); n > maxSteps {
+			head, tail := maxSteps/3, maxSteps-maxSteps/3
+			steps := append(append([]string{}, t.steps[:head]...), fmt.Sprintf("… %d more tool calls omitted …", n-head-tail))
+			t.steps = append(steps, t.steps[n-tail:]...)
 		}
 		t.chars = len(t.prompt) + len(t.assistant)
 		for _, s := range t.steps {

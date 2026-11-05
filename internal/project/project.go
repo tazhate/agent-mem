@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"time"
 )
 
 type Info struct {
@@ -17,27 +18,38 @@ type Info struct {
 	Git  bool
 }
 
-// Resolver caches lookups; the daemon resolves the same few cwds over and over.
+// Resolver caches lookups for a few minutes; the daemon resolves the same cwds over and over,
+// but a `git init` or a new worktree must be picked up without a restart.
 type Resolver struct {
 	mu    sync.Mutex
-	cache map[string]Info
+	cache map[string]cached
 }
 
-func NewResolver() *Resolver { return &Resolver{cache: map[string]Info{}} }
+type cached struct {
+	info Info
+	at   time.Time
+}
+
+const cacheTTL = 5 * time.Minute
+
+func NewResolver() *Resolver { return &Resolver{cache: map[string]cached{}} }
 
 func (r *Resolver) Resolve(cwd string) Info {
 	if cwd == "" {
 		return Info{Key: "unknown", Name: "unknown"}
 	}
 	r.mu.Lock()
-	info, ok := r.cache[cwd]
+	c, ok := r.cache[cwd]
 	r.mu.Unlock()
-	if ok {
-		return info
+	if ok && time.Since(c.at) < cacheTTL {
+		return c.info
 	}
-	info = Resolve(cwd)
+	info := Resolve(cwd)
 	r.mu.Lock()
-	r.cache[cwd] = info
+	if len(r.cache) > 10000 {
+		clear(r.cache)
+	}
+	r.cache[cwd] = cached{info, time.Now()}
 	r.mu.Unlock()
 	return info
 }
@@ -61,7 +73,11 @@ func Resolve(cwd string) Info {
 				common = commonDirFromFile(gitPath, dir)
 			}
 			if common != "" {
-				return Info{Key: common, Name: nameFromCommon(common), Root: dir, Git: true}
+				name := nameFromCommon(common)
+				if strings.HasPrefix(name, ".") { // ".bare" layouts: name the project after its directory
+					name = filepath.Base(filepath.Dir(common))
+				}
+				return Info{Key: common, Name: name, Root: dir, Git: true}
 			}
 		}
 		if parent := filepath.Dir(dir); parent == dir {

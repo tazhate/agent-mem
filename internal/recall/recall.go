@@ -9,6 +9,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"math"
+	"path/filepath"
 	"slices"
 	"strings"
 	"time"
@@ -125,7 +126,8 @@ func (e *Engine) Recall(ctx context.Context, req Request) (Result, error) {
 		if err != nil {
 			return Result{}, err
 		}
-		picked := pick(hits, seen, (e.cfg.MinScore+0.1)*strict, e.cfg.ErrorLimit)
+		// Error text is noisy (paths, generic words like "failed"); demand a clearly better match.
+		picked := pick(hits, seen, (e.cfg.MinScore+0.2)*strict, e.cfg.ErrorLimit)
 		return render("error", "This failure looks like something seen before", picked), nil
 	case event.SubagentStart:
 		if ev.Prompt == "" {
@@ -207,7 +209,14 @@ func (e *Engine) Search(ctx context.Context, text string, scope store.Scope, lim
 			continue
 		}
 		have := map[string]bool{}
-		for _, t := range stem.Tokens(m.Title + " " + m.Body + " " + strings.Join(m.Facts, " ") + " " + strings.Join(m.Files, " ") + " " + m.Type) {
+		// Same text the FTS index sees (title, body, facts, file names, concepts, type), so a
+		// match the index found also counts toward relevance.
+		bases := make([]string, len(m.Files))
+		for i, f := range m.Files {
+			bases[i] = filepath.Base(f)
+		}
+		for _, t := range stem.Tokens(m.Title + " " + m.Body + " " + strings.Join(m.Facts, " ") + " " + strings.Join(m.Files, " ") + " " +
+			strings.Join(bases, " ") + " " + strings.Join(m.Concepts, " ") + " " + m.Type) {
 			have[stem.Word(t)] = true
 		}
 		var got float64
@@ -224,7 +233,7 @@ func (e *Engine) Search(ctx context.Context, text string, scope store.Scope, lim
 			rel *= 0.4
 		}
 		if sim, ok := vecSim[m.ID]; ok {
-			floor := cmp.Or(e.cfg.VectorFloor, 0.40)
+			floor := e.cfg.VectorFloor // validated to [0, 0.95)
 			rel = max(rel, clamp01((float64(sim)-floor)/(1-floor)*1.5))
 		}
 		out = append(out, Scored{Mem: m, Rel: rel, Score: rel * typeWeight(m.Type) * recency(m) * usage(m)})
@@ -262,6 +271,9 @@ func (e *Engine) sessionStart(ctx context.Context, req Request, seen map[int64]b
 			}
 			b.WriteString(clip(line, 200) + "\n")
 			for _, it := range l.Items {
+				if b.Len() > budget/2 {
+					break
+				}
 				b.WriteString(clip("  - "+it.Task+" "+compactFields(it.Fields), 160) + "\n")
 			}
 			if b.Len() > budget/2 {

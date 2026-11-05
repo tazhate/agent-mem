@@ -46,10 +46,12 @@ func buildVersion() string {
 const ProtocolVersion = 1
 
 type Request struct {
-	V       int          `json:"v"`
-	Version string       `json:"version"`
-	Op      string       `json:"op"`
-	Event   *event.Event `json:"event,omitempty"`
+	V       int    `json:"v"`
+	Version string `json:"version"`
+	// Exe is the client's binary; the daemon replaces itself only for its own binary.
+	Exe   string       `json:"exe,omitempty"`
+	Op    string       `json:"op"`
+	Event *event.Event `json:"event,omitempty"`
 	// NoContext: the runtime cannot inject context for this hook, so skip recall (and do not
 	// mark anything as shown).
 	NoContext bool            `json:"no_context,omitempty"`
@@ -76,6 +78,7 @@ const (
 	OpWorkR    = "work_read"
 	OpStats    = "stats"
 	OpShadow   = "shadow"
+	OpRestart  = "restart"
 )
 
 type SearchParams struct {

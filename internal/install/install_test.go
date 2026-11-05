@@ -143,3 +143,44 @@ func TestKimiBlock(t *testing.T) {
 		t.Fatalf("kimi uninstall:\n%s", b)
 	}
 }
+
+func TestInstallerSafety(t *testing.T) {
+	o := setup(t)
+	o.SkipMCP = true
+	// Symlinked settings (stow, chezmoi) stay a symlink; the target gets the hooks.
+	dots := filepath.Join(o.Home, "dotfiles")
+	os.MkdirAll(dots, 0o755)
+	target := filepath.Join(dots, "settings.json")
+	link := filepath.Join(o.Home, ".claude", "settings.json")
+	os.Rename(link, target)
+	os.Symlink(target, link)
+	if _, err := Run(o, "claude-code", false); err != nil {
+		t.Fatal(err)
+	}
+	if fi, _ := os.Lstat(link); fi.Mode()&os.ModeSymlink == 0 {
+		t.Fatal("symlink replaced by a regular file")
+	}
+	if b, _ := os.ReadFile(target); !strings.Contains(string(b), "hook claude-code") {
+		t.Fatal("target not updated")
+	}
+	// Uninstalling a runtime that was never set up creates nothing.
+	if _, err := Run(o, "cursor", true); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(filepath.Join(o.Home, ".cursor")); err == nil {
+		t.Fatal("uninstall created ~/.cursor")
+	}
+	// A user's own MCP server named amem is not clobbered.
+	os.MkdirAll(filepath.Join(o.Home, ".gemini"), 0o755)
+	os.WriteFile(filepath.Join(o.Home, ".gemini", "settings.json"), []byte(`{"mcpServers":{"amem":{"httpUrl":"https://example.com/mcp"}}}`), 0o644)
+	if _, err := Run(Options{Home: o.Home, Binary: o.Binary}, "gemini", false); err == nil {
+		t.Fatal("foreign amem MCP entry overwritten")
+	}
+	// Paths with shell metacharacters are quoted.
+	if q := shellQuote("/opt/a&b;x/amem"); q != "'/opt/a&b;x/amem'" {
+		t.Fatalf("shellQuote: %s", q)
+	}
+	if tomlString("a\"b\\c\x01") != `"a\"b\\c\u0001"` {
+		t.Fatalf("tomlString: %s", tomlString("a\"b\\c\x01"))
+	}
+}

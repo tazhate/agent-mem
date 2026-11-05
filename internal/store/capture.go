@@ -61,6 +61,13 @@ func (s *Store) AdoptLegacy(ctx context.Context, projectID int64, name string) (
 	if err != nil || legacyID == projectID {
 		return false, err
 	}
+	// Two repos with the same directory name (~/work/api, ~/oss/api) cannot both claim the
+	// imported memories; leave that to `amem import --project-map`.
+	var rivals int
+	if err := s.db.QueryRowContext(ctx, `SELECT count(*) FROM projects WHERE name = ? AND key NOT LIKE 'legacy:%' AND id != ?`,
+		name, projectID).Scan(&rivals); err != nil || rivals > 0 {
+		return false, err
+	}
 	return true, s.Write(ctx, func(tx *sql.Tx) error {
 		for _, q := range []string{
 			`UPDATE memories SET project_id = ?1 WHERE project_id = ?2`,
@@ -247,12 +254,14 @@ func (s *Store) MarkProcessed(ctx context.Context, ids []int64) error {
 	})
 }
 
-// PruneEvents drops processed tool events older than the cutoff.
+// PruneEvents drops processed raw events (except prompts and imported raw tool uses) older than the cutoff.
 func (s *Store) PruneEvents(ctx context.Context, before int64) (int64, error) {
 	var n int64
 	err := s.Write(ctx, func(tx *sql.Tx) error {
-		// Prompts are the user's own history and stay; only bulky tool traffic expires.
-		res, err := tx.ExecContext(ctx, `DELETE FROM events WHERE processed = 1 AND ts < ? AND kind NOT IN ('prompt', 'turn_end')`, before)
+		// Prompts are the user's own history and stay. Raw tool traffic and final answers expire;
+		// tool uses imported on request (--raw) are kept.
+		res, err := tx.ExecContext(ctx, `DELETE FROM events WHERE processed = 1 AND ts < ? AND kind != 'prompt'
+			AND coalesce(origin, '') != 'claude-mem:tool'`, before)
 		if err != nil {
 			return err
 		}

@@ -68,6 +68,8 @@ func (s *Store) migrate(ctx context.Context) error {
 	// Columns added after the first release; CREATE TABLE IF NOT EXISTS does not add them.
 	for _, c := range []struct{ table, column, decl string }{
 		{"sessions", "private_turn", "INTEGER NOT NULL DEFAULT -1"},
+		{"memory_files", "base", "TEXT NOT NULL DEFAULT ''"},
+		{"watch_state", "pending", "TEXT NOT NULL DEFAULT '{}'"},
 		{"watch_state", "session", "TEXT NOT NULL DEFAULT ''"},
 		{"watch_state", "cwd", "TEXT NOT NULL DEFAULT ''"},
 		{"watch_state", "subagent", "INTEGER NOT NULL DEFAULT 0"},
@@ -75,6 +77,12 @@ func (s *Store) migrate(ctx context.Context) error {
 		if err := s.ensureColumn(ctx, c.table, c.column, c.decl); err != nil {
 			return err
 		}
+	}
+	if err := s.backfillFileBases(ctx); err != nil {
+		return fmt.Errorf("file name index: %w", err)
+	}
+	if _, err := s.db.ExecContext(ctx, `CREATE INDEX IF NOT EXISTS memory_files_base ON memory_files(base)`); err != nil {
+		return err
 	}
 	for _, f := range []string{"", "-wal", "-shm"} {
 		_ = os.Chmod(s.path+f, 0o600)
@@ -150,4 +158,45 @@ func (s *Store) Stats(ctx context.Context) (Stats, error) {
 		(SELECT count(*) FROM summaries), (SELECT count(*) FROM vectors)`).
 		Scan(&st.Projects, &st.Sessions, &st.Events, &st.PendingEvents, &st.Memories, &st.Summaries, &st.Vectors)
 	return st, err
+}
+
+// backfillFileBases fills memory_files.base for rows created before the column existed.
+func (s *Store) backfillFileBases(ctx context.Context) error {
+	for {
+		rows, err := s.db.QueryContext(ctx, `SELECT memory_id, path FROM memory_files WHERE base = '' LIMIT 5000`)
+		if err != nil {
+			return err
+		}
+		type row struct {
+			id   int64
+			path string
+		}
+		var batch []row
+		for rows.Next() {
+			var r row
+			if err := rows.Scan(&r.id, &r.path); err != nil {
+				rows.Close()
+				return err
+			}
+			batch = append(batch, r)
+		}
+		rows.Close()
+		if err := rows.Err(); err != nil || len(batch) == 0 {
+			return err
+		}
+		if err := s.Write(ctx, func(tx *sql.Tx) error {
+			for _, r := range batch {
+				base := filepath.Base(r.path)
+				if base == "" || base == "." || base == "/" {
+					base = r.path
+				}
+				if _, err := tx.ExecContext(ctx, `UPDATE memory_files SET base = ? WHERE memory_id = ? AND path = ?`, base, r.id, r.path); err != nil {
+					return err
+				}
+			}
+			return nil
+		}); err != nil {
+			return err
+		}
+	}
 }

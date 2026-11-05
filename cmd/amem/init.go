@@ -8,8 +8,10 @@ import (
 	"os/exec"
 	"slices"
 	"strings"
+	"time"
 
 	"github.com/tazhate/agent-mem/internal/config"
+	"github.com/tazhate/agent-mem/internal/daemon"
 	"github.com/tazhate/agent-mem/internal/install"
 	"github.com/tazhate/agent-mem/internal/provider"
 )
@@ -162,6 +164,10 @@ func cmdInit(args []string) int {
 		return fail("save config: %v", err)
 	}
 	fmt.Printf("wrote %s\n", path)
+	// A running daemon keeps its old settings until restarted; the next hook starts it again.
+	if _, err := daemon.Call(cfg, &daemon.Request{Op: daemon.OpRestart}, time.Second); err == nil {
+		fmt.Println("restarted the daemon to apply the new settings")
+	}
 
 	o, err := installOptions(false, false)
 	if err != nil {
@@ -184,5 +190,11 @@ func cmdInit(args []string) int {
 		fmt.Println("no runtimes installed; run `amem install <runtime>` later")
 		return 0
 	}
-	return applyInstall(o, strings.Split(runtimes, ","), false)
+	var list []string
+	for r := range strings.SplitSeq(runtimes, ",") {
+		if r = strings.TrimSpace(r); r != "" {
+			list = append(list, r)
+		}
+	}
+	return applyInstall(o, list, false)
 }

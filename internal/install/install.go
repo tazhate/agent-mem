@@ -5,15 +5,18 @@ package install
 
 import (
 	_ "embed"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io/fs"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"slices"
 	"strings"
 	"time"
+	"unicode/utf8"
 )
 
 //go:embed opencode.ts
@@ -89,6 +92,16 @@ func Run(o Options, name string, uninstall bool) ([]Change, error) {
 	if err != nil {
 		return nil, err
 	}
+	if uninstall {
+		// Removing amem from a runtime that never had it must not create its config files.
+		kept := changes[:0]
+		for _, c := range changes {
+			if len(c.Cmd) > 0 || c.Before != "" {
+				kept = append(kept, c)
+			}
+		}
+		changes = kept
+	}
 	if o.DryRun {
 		return changes, nil
 	}
@@ -103,6 +116,15 @@ func Run(o Options, name string, uninstall bool) ([]Change, error) {
 		}
 		if c.Before == c.After {
 			continue
+		}
+		// The runtime or the user may have edited the file since it was read: do not silently
+		// overwrite that.
+		now, err := readFile(c.Path)
+		if err != nil {
+			return nil, err
+		}
+		if now != c.Before {
+			return nil, fmt.Errorf("%s changed while installing; run the command again", c.Path)
 		}
 		if err := writeFile(c.Path, c.Before, c.After, stamp); err != nil {
 			return nil, err
@@ -129,6 +151,10 @@ func Installed(o Options) map[string]bool {
 }
 
 func writeFile(path, before, after, stamp string) error {
+	// Write through symlinks (stow, chezmoi): replace the target, not the link.
+	if real, err := filepath.EvalSymlinks(path); err == nil {
+		path = real
+	}
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 		return err
 	}
@@ -165,8 +191,10 @@ func command(o Options, runtime, event string) string {
 	return shellQuote(o.Binary) + " hook " + runtime + " " + event
 }
 
+var shellSafe = regexp.MustCompile(`^[A-Za-z0-9_./+:@%-]+$`)
+
 func shellQuote(s string) string {
-	if !strings.ContainsAny(s, " '\"$`\\") {
+	if shellSafe.MatchString(s) {
 		return s
 	}
 	return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'"
@@ -252,6 +280,12 @@ func mergeMCP(raw string, key string, entry map[string]any, uninstall bool) (str
 	if servers == nil {
 		servers = newObject()
 	}
+	if cur := servers.get("amem"); cur != nil && !isOurEntry(cur) {
+		if uninstall {
+			return render(doc) // someone else's "amem" server: leave it alone
+		}
+		return "", fmt.Errorf("an MCP server named \"amem\" exists that amem did not install; rename or remove it first")
+	}
 	if uninstall {
 		servers.del("amem")
 	} else {
@@ -277,6 +311,33 @@ func jsonFile(path string, edit func(string) (string, error)) (Change, error) {
 	return Change{Path: path, Before: before, After: after}, nil
 }
 
+// isOurEntry recognizes MCP entries written by amem install: an amem binary run with "mcp".
+func isOurEntry(v any) bool {
+	o, _ := v.(*object)
+	if o == nil {
+		return false
+	}
+	words := []string{}
+	switch c := o.get("command").(type) {
+	case string:
+		words = append(words, c)
+	case []any:
+		for _, w := range c {
+			if s, ok := w.(string); ok {
+				words = append(words, s)
+			}
+		}
+	}
+	if args, ok := o.get("args").([]any); ok {
+		for _, w := range args {
+			if s, ok := w.(string); ok {
+				words = append(words, s)
+			}
+		}
+	}
+	return len(words) >= 2 && filepath.Base(words[0]) == "amem" && words[len(words)-1] == "mcp"
+}
+
 // --- runtimes -------------------------------------------------------------------
 
 func claudeCode(o Options, uninstall bool) ([]Change, error) {
@@ -300,11 +361,11 @@ func claudeCode(o Options, uninstall bool) ([]Change, error) {
 	changes := []Change{c}
 	if !o.SkipMCP {
 		// ~/.claude.json is Claude Code's live state file; let the CLI edit it.
-		cmd := []string{"claude", "mcp", "add", "--scope", "user", "amem", "--", o.Binary, "mcp"}
-		if uninstall {
-			cmd = []string{"claude", "mcp", "remove", "--scope", "user", "amem"}
+		// Remove first: `add` refuses an existing name, which would keep a stale binary path.
+		changes = append(changes, Change{Cmd: []string{"claude", "mcp", "remove", "--scope", "user", "amem"}, Note: "unregister MCP server"})
+		if !uninstall {
+			changes = append(changes, Change{Cmd: []string{"claude", "mcp", "add", "--scope", "user", "amem", "--", o.Binary, "mcp"}, Note: "register MCP server"})
 		}
-		changes = append(changes, Change{Cmd: cmd, Note: "register MCP server"})
 	}
 	return changes, nil
 }
@@ -330,7 +391,7 @@ func codexInstall(o Options, uninstall bool) ([]Change, error) {
 	changes := []Change{c}
 	if !o.SkipMCP {
 		m, err := tomlBlock(filepath.Join(o.Home, ".codex", "config.toml"),
-			fmt.Sprintf("[mcp_servers.amem]\ncommand = %q\nargs = [\"mcp\"]\n", o.Binary), uninstall)
+			"[mcp_servers.amem]\ncommand = "+tomlString(o.Binary)+"\nargs = [\"mcp\"]\n", uninstall)
 		if err != nil {
 			return nil, err
 		}
@@ -366,7 +427,9 @@ func cursorInstall(o Options, uninstall bool) ([]Change, error) {
 		if err != nil {
 			return "", err
 		}
-		doc.set("version", 1)
+		if doc.get("version") == nil {
+			doc.set("version", 1)
+		}
 		hooks, _ := doc.get("hooks").(*object)
 		if hooks == nil {
 			hooks = newObject()
@@ -426,7 +489,8 @@ func opencodeInstall(o Options, uninstall bool) ([]Change, error) {
 	}
 	after := ""
 	if !uninstall {
-		after = strings.ReplaceAll(opencodePlugin, "__AMEM_BIN__", o.Binary)
+		bin, _ := json.Marshal(o.Binary)
+		after = strings.ReplaceAll(opencodePlugin, "__AMEM_BIN__", string(bin))
 	}
 	changes := []Change{{Path: plugin, Before: before, After: after}}
 	if !o.SkipMCP {
@@ -578,11 +642,11 @@ func kimiInstall(o Options, uninstall bool) ([]Change, error) {
 			b.WriteString("\n")
 		}
 		b.WriteString("[[hooks]]\n")
-		fmt.Fprintf(&b, "event = %q\n", r.event)
+		b.WriteString("event = " + tomlString(r.event) + "\n")
 		if r.matcher != "" {
-			fmt.Fprintf(&b, "matcher = %q\n", r.matcher)
+			b.WriteString("matcher = " + tomlString(r.matcher) + "\n")
 		}
-		fmt.Fprintf(&b, "command = %q\ntimeout = 10\n", command(o, "kimi", r.event))
+		b.WriteString("command = " + tomlString(command(o, "kimi", r.event)) + "\ntimeout = 10\n")
 	}
 	home := kimiHome(o)
 	c, err := markedBlock(filepath.Join(home, "config.toml"), "# >>> amem kimi hooks (managed by `amem install`)", "# <<< amem kimi hooks", "", b.String(), uninstall)
@@ -600,4 +664,28 @@ func kimiInstall(o Options, uninstall bool) ([]Change, error) {
 		changes = append(changes, m)
 	}
 	return changes, nil
+}
+
+// tomlString renders a TOML basic string. Go's %q is not TOML: it emits \x.. escapes and
+// accepts invalid UTF-8.
+func tomlString(s string) string {
+	var b strings.Builder
+	b.WriteByte('"')
+	for _, r := range s {
+		switch {
+		case r == '"' || r == '\\':
+			b.WriteByte('\\')
+			b.WriteRune(r)
+		case r == '\n':
+			b.WriteString(`\n`)
+		case r == '\t':
+			b.WriteString(`\t`)
+		case r < 0x20 || r == 0x7f || r == utf8.RuneError:
+			fmt.Fprintf(&b, `\u%04X`, r)
+		default:
+			b.WriteRune(r)
+		}
+	}
+	b.WriteByte('"')
+	return b.String()
 }

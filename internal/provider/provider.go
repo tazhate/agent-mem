@@ -5,12 +5,12 @@
 package provider
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"strings"
+	"time"
 
 	"github.com/tazhate/agent-mem/internal/config"
 )
@@ -70,7 +70,11 @@ func New(ctx context.Context, c config.ProviderConfig) (Provider, error) {
 
 // Chain tries providers in order and moves on when one fails in a retryable way
 // (rate limit, 5xx, timeout, CLI failure).
-type Chain struct{ list []Provider }
+type Chain struct {
+	list []Provider
+	// Timeout applies to each provider separately (0 = only the caller's context).
+	Timeout time.Duration
+}
 
 func NewChain(ctx context.Context, cfgs []config.ProviderConfig) (*Chain, error) {
 	var ch Chain
@@ -103,7 +107,14 @@ func (c *Chain) Name() string {
 func (c *Chain) Complete(ctx context.Context, req Request) (json.RawMessage, error) {
 	var errs []error
 	for _, p := range c.list {
-		out, err := p.Complete(ctx, req)
+		// Each provider gets its own deadline: a hung first provider must leave time for the
+		// fallback, which exists exactly for that case.
+		pctx, cancel := ctx, context.CancelFunc(func() {})
+		if c.Timeout > 0 {
+			pctx, cancel = context.WithTimeout(ctx, c.Timeout)
+		}
+		out, err := p.Complete(pctx, req)
+		cancel()
 		if err == nil {
 			return out, nil
 		}
@@ -119,6 +130,8 @@ func (c *Chain) Complete(ctx context.Context, req Request) (json.RawMessage, err
 }
 
 // extractJSON pulls the first JSON object out of model text (code fences, prose around it).
+// Prose may itself contain braces, so every "{" is tried in turn; an empty object is only
+// accepted when nothing larger follows.
 func extractJSON(s string) (json.RawMessage, error) {
 	s = strings.TrimSpace(s)
 	if rest, ok := strings.CutPrefix(s, "```"); ok {
@@ -127,22 +140,32 @@ func extractJSON(s string) (json.RawMessage, error) {
 		}
 		s = strings.TrimSuffix(strings.TrimSpace(rest), "```")
 	}
-	start := strings.IndexByte(s, '{')
-	end := strings.LastIndexByte(s, '}')
-	if start < 0 || end < start {
-		return nil, fmt.Errorf("no JSON object in model output: %.200q", s)
-	}
-	raw := json.RawMessage(s[start : end+1])
-	if !json.Valid(raw) {
-		// Walk forward for the first balanced object.
-		dec := json.NewDecoder(bytes.NewReader([]byte(s[start:])))
-		var v json.RawMessage
-		if err := dec.Decode(&v); err != nil {
-			return nil, fmt.Errorf("invalid JSON in model output: %w", err)
+	var empty json.RawMessage
+	for i := 0; i < len(s); i++ {
+		if s[i] != '{' {
+			continue
 		}
-		raw = v
+		var v json.RawMessage
+		if err := json.NewDecoder(strings.NewReader(s[i:])).Decode(&v); err != nil {
+			continue
+		}
+		var obj map[string]json.RawMessage
+		if json.Unmarshal(v, &obj) != nil {
+			continue
+		}
+		if len(obj) == 0 {
+			if empty == nil {
+				empty = v
+			}
+			i += len(v) - 1
+			continue
+		}
+		return v, nil
 	}
-	return raw, nil
+	if empty != nil {
+		return empty, nil
+	}
+	return nil, fmt.Errorf("no JSON object in model output: %.200q", s)
 }
 
 // schemaPrompt is appended when a backend cannot enforce the schema itself.
