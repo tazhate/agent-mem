@@ -22,14 +22,14 @@ Windows is not supported: the daemon relies on a unix socket and flock.
 `amem init` asks four questions:
 
 - **Observer** - what writes the memories. A subscription CLI (`claude`, `codex`, `gemini`: your own login, shared limits) or an API key (`anthropic`, or `openai`, which means any OpenAI-compatible server: OpenRouter, Ollama, vLLM, DeepSeek). The key is stored as a reference: `env:NAME`, `cmd:vault kv get ...`, `file:path`.
-- **Embedder** - `none` (full-text search only, with ru/en stemming), Ollama, or any `/v1/embeddings` endpoint. `bge-m3` works well for mixed Russian and English text.
+- **Embedder** - `static` (default: a built-in multilingual model2vec model, no service, one 530 MB download, about 3 minutes for 100k memories), `none` (full-text search only, with ru/en stemming), Ollama, or any `/v1/embeddings` endpoint. `amem embed pull` downloads the static model and checks its sha256.
 - **Language** of the memories.
 - **Recall mode**: `on`, `shadow` (compute what would be injected, but don't inject it) or `off`.
 
 The same setup works without prompts through flags:
 
 ```bash
-amem init --yes --observer claude --embed none --language Russian --recall shadow --runtimes claude-code,codex
+amem init --yes --observer claude --embed static --language Russian --recall shadow --runtimes claude-code,codex
 ```
 
 Hooks are installed separately and can be removed again:
@@ -78,6 +78,7 @@ Switchover order:
 | `amem show 123 456` | full memories |
 | `amem save [--global] [--type T] text` | manual note; `--global` makes it visible in every project |
 | `amem doctor [--probe]` | daemon, hooks, provider, embedder, spool |
+| `amem embed pull [--model repo]` | download a model2vec model for `embed.kind = "static"` |
 | `amem stats` | database counters |
 | `amem watch --preset claude\|codex` | transcripts for runtimes without hooks (`--subagents-only` works with `codex` only) |
 | `amem scrub [--dry-run]` | re-apply the current redaction rules to everything already stored |

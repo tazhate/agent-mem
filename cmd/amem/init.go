@@ -2,6 +2,8 @@ package main
 
 import (
 	"bufio"
+	"cmp"
+	"context"
 	"flag"
 	"fmt"
 	"os"
@@ -12,6 +14,7 @@ import (
 
 	"github.com/tazhate/agent-mem/internal/config"
 	"github.com/tazhate/agent-mem/internal/daemon"
+	"github.com/tazhate/agent-mem/internal/embed"
 	"github.com/tazhate/agent-mem/internal/install"
 	"github.com/tazhate/agent-mem/internal/provider"
 )
@@ -35,9 +38,9 @@ func cmdInit(args []string) int {
 	fs.StringVar(&a.observerModel, "observer-model", "", "model name for the observer")
 	fs.StringVar(&a.observerURL, "observer-url", "", "base URL for openai-compatible or anthropic gateways")
 	fs.StringVar(&a.observerKey, "observer-key", "", "API key reference: env:NAME, cmd:..., file:...")
-	fs.StringVar(&a.embed, "embed", "", "none | ollama | openai")
+	fs.StringVar(&a.embed, "embed", "", "none | static (built-in model2vec) | ollama | openai")
 	fs.StringVar(&a.embedURL, "embed-url", "", "embeddings base URL (default Ollama http://127.0.0.1:11434/v1)")
-	fs.StringVar(&a.embedModel, "embed-model", "", "embedding model, e.g. bge-m3")
+	fs.StringVar(&a.embedModel, "embed-model", "", "embedding model: a model2vec repo for static, a model name for ollama/openai")
 	fs.StringVar(&a.embedKey, "embed-key", "", "embeddings API key reference")
 	fs.StringVar(&a.language, "language", "", "language of written memories, e.g. Russian")
 	fs.StringVar(&a.recallMode, "recall", "", "on | shadow | off")
@@ -116,11 +119,24 @@ func cmdInit(args []string) int {
 	// Embedder: optional semantic search, the user's choice.
 	if a.embed == "" {
 		fmt.Println("Embeddings add search by meaning (helps across languages). Without them amem uses full-text search only.")
-		a.embed = ask("Embedder", "none", "none", "ollama", "openai")
+		fmt.Println("static = built-in multilingual model2vec model: no service, ~3 min for 100k memories, one 530 MB download.")
+		a.embed = ask("Embedder", "static", "none", "static", "ollama", "openai")
 	}
 	switch a.embed {
 	case "none":
 		cfg.Embed.Kind = "none"
+	case "static":
+		cfg.Embed.Kind = "static"
+		cfg.Embed.Model = cmp.Or(a.embedModel, embed.DefaultStatic)
+		cfg.Embed.BaseURL, cfg.Embed.Key = "", ""
+		cfg.Embed.BatchSize = 128
+		// Static embeddings spread unrelated texts lower than transformer models.
+		cfg.Recall.VectorFloor = 0.25
+		dir, err := embed.Pull(context.Background(), cfg.Embed.Model, cfg.ModelsDir(), func(s string) { fmt.Println(" ", s) })
+		if err != nil {
+			return fail("download model: %v", err)
+		}
+		fmt.Println("model ready in", dir)
 	case "ollama", "openai":
 		cfg.Embed.Kind = "openai"
 		cfg.Embed.BaseURL = a.embedURL

@@ -83,7 +83,7 @@ func cmdDoctor(args []string) int {
 	} else {
 		fmt.Println("     observer disabled: events are captured, no new memories are written")
 	}
-	emb, err := embed.NewEmbedder(ctx, cfg.Embed)
+	emb, err := embed.NewEmbedder(ctx, cfg.Embed, cfg.ModelsDir())
 	switch {
 	case err != nil:
 		ok(false, "embedder: %v", err)

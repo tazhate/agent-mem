@@ -36,11 +36,18 @@ type Embedder interface {
 	Embed(ctx context.Context, texts []string) ([][]float32, error)
 }
 
-// NewEmbedder returns nil for kind "none".
-func NewEmbedder(ctx context.Context, c config.EmbedConfig) (Embedder, error) {
+// NewEmbedder returns nil for kind "none". modelsDir holds downloaded static models.
+func NewEmbedder(ctx context.Context, c config.EmbedConfig, modelsDir string) (Embedder, error) {
 	switch c.Kind {
 	case "", "none":
 		return nil, nil
+	case "static":
+		dir := StaticDir(c.Model, modelsDir)
+		m, err := LoadStatic(dir)
+		if err != nil {
+			return nil, fmt.Errorf("static model %s: %w (run `amem embed pull`)", dir, err)
+		}
+		return m, nil
 	case "openai":
 		key, err := config.Resolve(ctx, c.Key)
 		if err != nil {
@@ -52,7 +59,7 @@ func NewEmbedder(ctx context.Context, c config.EmbedConfig) (Embedder, error) {
 		return &openAI{base: strings.TrimRight(cmp.Or(c.BaseURL, "http://127.0.0.1:11434/v1"), "/"), key: key, model: c.Model,
 			client: &http.Client{Timeout: 60 * time.Second}}, nil
 	}
-	return nil, fmt.Errorf("embed: unknown kind %q (none, openai)", c.Kind)
+	return nil, fmt.Errorf("embed: unknown kind %q (none, static, openai)", c.Kind)
 }
 
 type openAI struct {
@@ -224,6 +231,16 @@ func (x *Index) Run(ctx context.Context) {
 }
 
 func (x *Index) load(ctx context.Context) error {
+	// Vectors of another model cannot be compared with this one's; drop them once.
+	if err := x.st.Write(ctx, func(tx *sql.Tx) error {
+		res, err := tx.ExecContext(ctx, `DELETE FROM vectors WHERE model != ?`, x.emb.Model())
+		if n, _ := res.RowsAffected(); err == nil && n > 0 {
+			x.log.Info("dropped vectors of a previous embedding model", "rows", n)
+		}
+		return err
+	}); err != nil {
+		return err
+	}
 	rows, err := x.st.DB().QueryContext(ctx, `SELECT v.memory_id, coalesce(m.project_id, 0), v.dim, v.q FROM vectors v
 		JOIN memories m ON m.id = v.memory_id WHERE v.model = ? AND v.dim > 0 AND m.private = 0 AND m.superseded_by IS NULL`, x.emb.Model())
 	if err != nil {

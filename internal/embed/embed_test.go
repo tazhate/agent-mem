@@ -64,7 +64,7 @@ func TestBackfillAndSearch(t *testing.T) {
 	st.InsertMemory(ctx, &store.Memory{ProjectID: other, Type: "gotcha", Title: "chroma mcp eats cpu on every sync too", Body: "other project"})
 
 	cfg := config.EmbedConfig{Kind: "openai", BaseURL: srv.URL, Model: "toy", BatchSize: 2}
-	emb, err := NewEmbedder(ctx, cfg)
+	emb, err := NewEmbedder(ctx, cfg, t.TempDir())
 	if err != nil {
 		t.Fatal(err)
 	}
