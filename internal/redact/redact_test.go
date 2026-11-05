@@ -26,7 +26,7 @@ func TestClean(t *testing.T) {
 		{"remote glpat-" + "abcdefghijklmnopqrstu done", "glpat-" + "abcdefghij", "done"},
 		{"//registry/:_authToken=npm_" + "abcdefghijklmnopqrstuvwxyz0123456789", "npm_" + "abcdefghij", "registry"},
 		{"HF hf_" + "abcdefghijklmnopqrstuvwxyzABCDEFGH ok", "hf_" + "abcdefghij", "ok"},
-		{"bot 123456789:AAHdqTcvCH1vGWJxfSeofSAs0K5PALDsaw x", "AAHdqTcvCH1vGWJx", "bot"},
+		{"bot 123456789:" + "AA" + "HdqTcvCH1vGWJxfSeofSAs0K5PALDsaw x", "HdqTcvCH1vGWJx", "bot"}, // Telegram docs example token, split for secret scanners
 		{"Authorization: Basic dXNlcjpwYXNzd29yZA==", "dXNlcjpwYXNzd29yZA", "Authorization"},
 		{"DefaultEndpointsProtocol=https;AccountKey=abcDEF123456789+/abcdefghij==;", "abcDEF123456789", "AccountKey="},
 		{"head id_rsa\n-----BEGIN OPENSSH PRIVATE KEY-----\nb3BlbnNzaC1rZXktdjEAAAA", "b3BlbnNzaC1rZXkt", "head id_rsa"},
