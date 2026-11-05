@@ -129,20 +129,21 @@ func StartAndWait(cfg *config.Config, timeout time.Duration) error {
 	if err := cmd.Start(); err != nil {
 		return err
 	}
-	exited := make(chan struct{})
-	go func() { _ = cmd.Wait(); close(exited) }()
+	exited := make(chan error, 1)
+	go func() { exited <- cmd.Wait() }()
 	end := time.Now().Add(timeout)
 	for time.Now().Before(end) {
 		if _, err := Call(cfg, &Request{Op: OpPing}, 200*time.Millisecond); err == nil {
 			return nil
 		}
 		select {
-		case <-exited:
-			// Another daemon may have held the lock (our child exits 0): one last ping decides.
-			if _, err := Call(cfg, &Request{Op: OpPing}, 500*time.Millisecond); err == nil {
-				return nil
+		case err := <-exited:
+			// Exit 0 means another daemon holds the lock (it may still be migrating): keep
+			// polling. A failure exit (bad config, broken database) will not get better.
+			if err != nil {
+				return fmt.Errorf("daemon exited during start (%v); see %s", err, cfg.LogPath())
 			}
-			return fmt.Errorf("daemon exited during start; see %s", cfg.LogPath())
+			exited = nil
 		case <-time.After(50 * time.Millisecond):
 		}
 	}
