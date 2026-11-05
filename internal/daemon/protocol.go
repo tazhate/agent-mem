@@ -4,13 +4,43 @@ package daemon
 
 import (
 	"encoding/json"
+	"runtime/debug"
 
 	"agent-mem/internal/event"
 )
 
-// Version changes whenever the binary changes behavior; a hook from a different version makes
+// Version identifies the build (release + git revision); a hook from a different build makes
 // the daemon exit after answering, so the next hook starts the new binary.
-const Version = "0.1.0"
+var Version = buildVersion()
+
+const release = "0.1.0"
+
+func buildVersion() string {
+	info, ok := debug.ReadBuildInfo()
+	if !ok {
+		return release
+	}
+	rev, dirty := "", false
+	for _, s := range info.Settings {
+		switch s.Key {
+		case "vcs.revision":
+			rev = s.Value
+		case "vcs.modified":
+			dirty = s.Value == "true"
+		}
+	}
+	if len(rev) > 12 {
+		rev = rev[:12]
+	}
+	v := release
+	if rev != "" {
+		v += "+" + rev
+	}
+	if dirty {
+		v += "-dirty"
+	}
+	return v
+}
 
 // ProtocolVersion is bumped only on incompatible wire changes.
 const ProtocolVersion = 1
@@ -20,6 +50,9 @@ type Request struct {
 	Version string          `json:"version"`
 	Op      string          `json:"op"`
 	Event   *event.Event    `json:"event,omitempty"`
+	// NoContext: the runtime cannot inject context for this hook, so skip recall (and do not
+	// mark anything as shown).
+	NoContext bool `json:"no_context,omitempty"`
 	Params  json.RawMessage `json:"params,omitempty"`
 }
 

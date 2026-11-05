@@ -64,7 +64,8 @@ func cmdHook(args []string) (code int) {
 	if ev.Kind.WantsContext() {
 		timeout = 1500 * time.Millisecond
 	}
-	req := &daemon.Request{Op: daemon.OpEvent, Event: ev}
+	// Ask the adapter whether this hook can carry context at all; recall is skipped otherwise.
+	req := &daemon.Request{Op: daemon.OpEvent, Event: ev, NoContext: ad.Render(ev, hookArg, "probe") == nil}
 	resp, err := daemon.Call(cfg, req, timeout)
 	if err != nil && daemon.IsUnavailable(err) {
 		if serr := daemon.Spawn(cfg); serr != nil {

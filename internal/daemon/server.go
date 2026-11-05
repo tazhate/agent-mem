@@ -252,7 +252,7 @@ func (s *Server) handle(ctx context.Context, req *Request) Response {
 			err = errors.New("missing event")
 			break
 		}
-		resp.Context, err = s.ingest(ctx, req.Event, true)
+		resp.Context, err = s.ingest(ctx, req.Event, !req.NoContext)
 	default:
 		data, err = s.api(ctx, req.Op, req.Params)
 	}
@@ -464,7 +464,7 @@ func (s *Server) feedback(ctx context.Context, ev *event.Event, sid string, own 
 
 func isEdit(tool string) bool {
 	switch tool {
-	case "Edit", "Write", "MultiEdit", "NotebookEdit", "apply_patch", "write_file", "replace", "edit":
+	case "Edit", "Write", "MultiEdit", "NotebookEdit", "apply_patch", "write_file", "replace", "edit", "WriteFile", "StrReplaceFile":
 		return true
 	}
 	return false

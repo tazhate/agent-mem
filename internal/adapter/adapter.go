@@ -40,7 +40,7 @@ func Get(name string) (Adapter, error) {
 }
 
 func Names() []string {
-	return []string{"claude-code", "codex", "gemini", "cursor", "opencode"}
+	return []string{"claude-code", "codex", "gemini", "cursor", "opencode", "kimi"}
 }
 
 // ErrSkip marks payloads that carry nothing worth recording (unknown events and the like).
@@ -61,6 +61,7 @@ type payload struct {
 	ToolResponse         json.RawMessage `json:"tool_response"`
 	ToolOutput           json.RawMessage `json:"tool_output"`
 	ToolUseID            string          `json:"tool_use_id"`
+	ToolCallID           string          `json:"tool_call_id"`
 	Error                json.RawMessage `json:"error"`
 	AgentID              string          `json:"agent_id"`
 	AgentType            string          `json:"agent_type"`

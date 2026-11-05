@@ -103,3 +103,18 @@ func TestOtherRuntimes(t *testing.T) {
 		t.Fatalf("unknown events must skip, got %v", err)
 	}
 }
+
+func TestKimi(t *testing.T) {
+	k, _ := Get("kimi")
+	ev, err := k.Parse("", []byte(`{"session_id":"k1","cwd":"/k","hook_event_name":"UserPromptSubmit","prompt":[{"type":"text","text":"почини"},{"type":"image_url"}]}`), env(nil))
+	if err != nil || ev.Kind != event.Prompt || ev.Prompt != "почини" {
+		t.Fatalf("kimi prompt: %v %+v", err, ev)
+	}
+	ev, _ = k.Parse("", []byte(`{"session_id":"k1","cwd":"/k","hook_event_name":"PostToolUseFailure","tool_name":"Shell","tool_input":{"command":"make"},"tool_output":"boom","tool_call_id":"c9"}`), env(nil))
+	if ev.Kind != event.ToolFail || ev.Tool.UseID != "c9" || ev.Tool.Error != "boom" {
+		t.Fatalf("kimi failure: %+v %+v", ev, ev.Tool)
+	}
+	if string(k.Render(ev, "UserPromptSubmit", "ctx")) != "ctx" || k.Render(ev, "Stop", "ctx") != nil {
+		t.Fatal("kimi render")
+	}
+}

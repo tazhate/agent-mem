@@ -120,3 +120,26 @@ func TestOtherRuntimes(t *testing.T) {
 		}
 	}
 }
+
+func TestKimiBlock(t *testing.T) {
+	o := setup(t)
+	os.MkdirAll(filepath.Join(o.Home, ".kimi-code"), 0o755)
+	os.WriteFile(filepath.Join(o.Home, ".kimi-code", "config.toml"), []byte("[[hooks]]\nevent = \"SessionStart\"\ncommand = \"mine\"\n"), 0o644)
+	if _, err := Run(o, "kimi", false); err != nil {
+		t.Fatal(err)
+	}
+	b, _ := os.ReadFile(filepath.Join(o.Home, ".kimi-code", "config.toml"))
+	if !strings.Contains(string(b), `command = "mine"`) || strings.Count(string(b), "hook kimi") != 7 {
+		t.Fatalf("kimi:\n%s", b)
+	}
+	Run(o, "kimi", false)
+	b, _ = os.ReadFile(filepath.Join(o.Home, ".kimi-code", "config.toml"))
+	if strings.Count(string(b), "hook kimi") != 7 {
+		t.Fatal("reinstall duplicated kimi hooks")
+	}
+	Run(o, "kimi", true)
+	b, _ = os.ReadFile(filepath.Join(o.Home, ".kimi-code", "config.toml"))
+	if strings.Contains(string(b), "amem") {
+		t.Fatalf("kimi uninstall:\n%s", b)
+	}
+}

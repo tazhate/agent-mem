@@ -54,6 +54,7 @@ var runtimes = []runtime{
 	{"gemini", geminiInstall, func(o Options) bool { return exists(filepath.Join(o.Home, ".gemini")) }},
 	{"cursor", cursorInstall, func(o Options) bool { return exists(filepath.Join(o.Home, ".cursor")) }},
 	{"opencode", opencodeInstall, func(o Options) bool { return exists(filepath.Join(o.Home, ".config", "opencode")) }},
+	{"kimi", kimiInstall, func(o Options) bool { return exists(kimiHome(o)) }},
 }
 
 func Runtimes() []string {
@@ -119,6 +120,7 @@ func Installed(o Options) map[string]bool {
 		filepath.Join(o.Home, ".gemini", "settings.json"):                  "gemini",
 		filepath.Join(o.Home, ".cursor", "hooks.json"):                     "cursor",
 		filepath.Join(o.Home, ".config", "opencode", "plugins", "amem.ts"): "opencode",
+		filepath.Join(kimiHome(o), "config.toml"):                          "kimi",
 	} {
 		b, err := os.ReadFile(path)
 		out[name] = err == nil && strings.Contains(string(b), "hook "+name)
@@ -447,6 +449,12 @@ const (
 // tomlBlock adds or removes a marked block of TOML text, leaving the rest of the file (and its
 // comments) byte-for-byte intact.
 func tomlBlock(path, block string, uninstall bool) (Change, error) {
+	return markedBlock(path, tomlBegin, tomlEnd, "[mcp_servers.amem]", block, uninstall)
+}
+
+// markedBlock adds or removes text between begin/end marker lines; conflict is a string whose
+// presence outside the block means the user configured it by hand.
+func markedBlock(path, tomlBegin, tomlEnd, conflict, block string, uninstall bool) (Change, error) {
 	before, err := readFile(path)
 	if err != nil {
 		return Change{}, err
@@ -462,8 +470,8 @@ func tomlBlock(path, block string, uninstall bool) (Change, error) {
 		}
 	}
 	if !uninstall {
-		if strings.Contains(after, "[mcp_servers.amem]") {
-			return Change{}, fmt.Errorf("%s already has an unmanaged [mcp_servers.amem] section", path)
+		if conflict != "" && strings.Contains(after, conflict) {
+			return Change{}, fmt.Errorf("%s already has an unmanaged %s entry", path, conflict)
 		}
 		if after != "" && !strings.HasSuffix(after, "\n") {
 			after += "\n"
@@ -542,4 +550,54 @@ func splitLines(s string) []string {
 		return nil
 	}
 	return strings.Split(strings.TrimSuffix(s, "\n"), "\n")
+}
+
+// kimiHome honors $KIMI_CODE_HOME like Kimi Code itself.
+func kimiHome(o Options) string {
+	if h := os.Getenv("KIMI_CODE_HOME"); h != "" && o.Home == mustHome() {
+		return h
+	}
+	return filepath.Join(o.Home, ".kimi-code")
+}
+
+func mustHome() string { h, _ := os.UserHomeDir(); return h }
+
+func kimiInstall(o Options, uninstall bool) ([]Change, error) {
+	rules := []struct{ event, matcher string }{
+		{"SessionStart", "startup|resume"},
+		{"UserPromptSubmit", ""},
+		{"PreToolUse", ""},
+		{"PostToolUse", ""},
+		{"PostToolUseFailure", ""},
+		{"Stop", ""},
+		{"PreCompact", ""},
+	}
+	var b strings.Builder
+	for i, r := range rules {
+		if i > 0 {
+			b.WriteString("\n")
+		}
+		b.WriteString("[[hooks]]\n")
+		fmt.Fprintf(&b, "event = %q\n", r.event)
+		if r.matcher != "" {
+			fmt.Fprintf(&b, "matcher = %q\n", r.matcher)
+		}
+		fmt.Fprintf(&b, "command = %q\ntimeout = 10\n", command(o, "kimi", r.event))
+	}
+	home := kimiHome(o)
+	c, err := markedBlock(filepath.Join(home, "config.toml"), "# >>> amem kimi hooks (managed by `amem install`)", "# <<< amem kimi hooks", "", b.String(), uninstall)
+	if err != nil {
+		return nil, err
+	}
+	changes := []Change{c}
+	if !o.SkipMCP {
+		m, err := jsonFile(filepath.Join(home, "mcp.json"), func(raw string) (string, error) {
+			return mergeMCP(raw, "mcpServers", map[string]any{"command": o.Binary, "args": []string{"mcp"}}, uninstall)
+		})
+		if err != nil {
+			return nil, err
+		}
+		changes = append(changes, m)
+	}
+	return changes, nil
 }
