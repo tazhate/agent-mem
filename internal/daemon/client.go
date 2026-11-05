@@ -61,12 +61,8 @@ func CallData(cfg *config.Config, op string, params, out any) error {
 	req := &Request{Op: op, Params: raw}
 	resp, err := Call(cfg, req, 10*time.Second)
 	if err != nil && IsUnavailable(err) {
-		if err := Spawn(cfg); err != nil {
+		if err := StartAndWait(cfg, 20*time.Second); err != nil {
 			return err
-		}
-		// The first start after an upgrade may run migrations for several seconds.
-		if !WaitReady(cfg, 20*time.Second) {
-			return fmt.Errorf("daemon did not start; see %s", cfg.LogPath())
 		}
 		resp, err = Call(cfg, req, 10*time.Second)
 	}
@@ -108,6 +104,49 @@ func Spawn(cfg *config.Config) error {
 		return err
 	}
 	return cmd.Process.Release()
+}
+
+// StartAndWait starts the daemon and waits until it answers. It returns early when the started
+// process exits without answering (bad config, broken database), pointing at the log.
+func StartAndWait(cfg *config.Config, timeout time.Duration) error {
+	exe, err := os.Executable()
+	if err != nil {
+		return err
+	}
+	if err := os.MkdirAll(cfg.DataDir, 0o700); err != nil {
+		return err
+	}
+	logf, err := os.OpenFile(cfg.LogPath(), os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o600)
+	if err != nil {
+		return err
+	}
+	defer logf.Close()
+	cmd := exec.Command(exe, "daemon")
+	cmd.Dir = "/"
+	cmd.Stdout, cmd.Stderr = logf, logf
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setsid: true}
+	cmd.Env = append(os.Environ(), "AMEM_DISABLE=1")
+	if err := cmd.Start(); err != nil {
+		return err
+	}
+	exited := make(chan struct{})
+	go func() { _ = cmd.Wait(); close(exited) }()
+	end := time.Now().Add(timeout)
+	for time.Now().Before(end) {
+		if _, err := Call(cfg, &Request{Op: OpPing}, 200*time.Millisecond); err == nil {
+			return nil
+		}
+		select {
+		case <-exited:
+			// Another daemon may have held the lock (our child exits 0): one last ping decides.
+			if _, err := Call(cfg, &Request{Op: OpPing}, 500*time.Millisecond); err == nil {
+				return nil
+			}
+			return fmt.Errorf("daemon exited during start; see %s", cfg.LogPath())
+		case <-time.After(50 * time.Millisecond):
+		}
+	}
+	return fmt.Errorf("daemon did not answer within %s; see %s", timeout, cfg.LogPath())
 }
 
 // WaitReady polls until the daemon answers a ping or the timeout passes.

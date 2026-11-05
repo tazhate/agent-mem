@@ -1,7 +1,6 @@
 package daemon
 
 import (
-	"cmp"
 	"context"
 	"database/sql"
 	"encoding/json"
@@ -101,7 +100,13 @@ func (s *Server) api(ctx context.Context, op string, raw json.RawMessage) (any, 
 		if err := json.Unmarshal(raw, &p); err != nil {
 			return nil, err
 		}
-		mems, err := s.st.Timeline(ctx, p.Anchor, min(cmp.Or(p.Before, 5), 50), min(cmp.Or(p.After, 5), 50))
+		window := func(n int) int { // SQLite treats a negative LIMIT as no limit
+			if n <= 0 {
+				return 5
+			}
+			return min(n, 50)
+		}
+		mems, err := s.st.Timeline(ctx, p.Anchor, window(p.Before), window(p.After))
 		if errors.Is(err, sql.ErrNoRows) {
 			return nil, fmt.Errorf("memory #%d not found", p.Anchor)
 		}

@@ -143,7 +143,7 @@ Records with `superseded_by` set never appear in results.
 
 An unknown type becomes `discovery`. Title up to 80 characters, body up to 600, facts as a list. The output language is a single setting, not 28 mode files.
 
-**Update instead of accumulate.** Each batch comes with up to 10 related existing records: 5 by the files it touches and 5 by text search. The model can return `supersedes: [ids]` or `update: {id, body}`. Outdated records are marked and drop out of results. A year from now the database holds current knowledge, not 108k layers of history.
+**Update instead of accumulate.** Each batch comes with up to 8 related existing records: first those about the same files, then text matches above a relevance floor. The model can return `supersedes: [ids]` or `update: {id, body}`. Outdated records are marked and drop out of results. A year from now the database holds current knowledge, not 108k layers of history.
 
 **Stateless.** Every batch is an independent call. No long SDK session, no `memorySessionId`, no generator restart loops.
 

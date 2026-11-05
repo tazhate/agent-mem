@@ -110,9 +110,13 @@ func benchHook(n int) int {
 	os.WriteFile(filepath.Join(home, "config.toml"), []byte("[observer]\nenabled = false\n"), 0o600)
 	env := append(os.Environ(), "AMEM_HOME="+home)
 	defer func() {
-		// Ask the scratch daemon to stop over its own socket; never signal a PID from a file.
-		scratch := *loadCfgAt(home)
-		_, _ = daemon.Call(&scratch, &daemon.Request{Op: daemon.OpRestart}, time.Second)
+		// Stop the scratch daemon over its own socket (never by a PID read from a file) and
+		// wait until it released its lock, so it cannot recreate the temp dir after removal.
+		scratch := loadCfgAt(home)
+		if daemon.WaitReady(scratch, 5*time.Second) {
+			_, _ = daemon.Call(scratch, &daemon.Request{Op: daemon.OpRestart}, time.Second)
+		}
+		daemon.WaitStopped(scratch, 5*time.Second)
 	}()
 	payload := `{"session_id":"bench","cwd":"/tmp","hook_event_name":"PostToolUse","tool_name":"Bash","tool_input":{"command":"true"},"tool_response":{"stdout":""}}`
 	var lat []time.Duration

@@ -50,8 +50,10 @@ func cmdSearch(args []string) int {
 	default:
 		p.Project = *proj
 	}
-	if *typ != "" {
-		p.Types = strings.Split(*typ, ",")
+	for t := range strings.SplitSeq(*typ, ",") {
+		if t = strings.TrimSpace(t); t != "" {
+			p.Types = append(p.Types, t)
+		}
 	}
 	var hits []daemon.SearchHit
 	if err := daemon.CallData(loadCfg(), daemon.OpSearch, p, &hits); err != nil {

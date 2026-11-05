@@ -95,6 +95,24 @@ func Lock(cfg *config.Config) (*os.File, error) {
 	return f, nil
 }
 
+// WaitStopped waits until no daemon holds the lock of cfg's data directory.
+func WaitStopped(cfg *config.Config, timeout time.Duration) bool {
+	end := time.Now().Add(timeout)
+	for time.Now().Before(end) {
+		f, err := os.OpenFile(cfg.LockPath(), os.O_RDWR, 0)
+		if err != nil {
+			return true // no lock file: nothing running
+		}
+		err = syscall.Flock(int(f.Fd()), syscall.LOCK_EX|syscall.LOCK_NB)
+		f.Close()
+		if err == nil {
+			return true
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	return false
+}
+
 // Run serves until ctx ends, the idle timeout fires, or a newer binary asks for a restart.
 func (s *Server) Run(ctx context.Context, foreground bool) error {
 	ctx, cancel := context.WithCancel(ctx)

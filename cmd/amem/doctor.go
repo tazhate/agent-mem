@@ -45,6 +45,14 @@ func cmdDoctor(args []string) int {
 		Warnings []string `json:"warnings"`
 	}
 	resp, err := daemon.Call(cfg, &daemon.Request{Op: daemon.OpPing}, time.Second)
+	if err != nil && daemon.IsUnavailable(err) {
+		// Not running is normal; not being able to start is not.
+		if serr := daemon.StartAndWait(cfg, 15*time.Second); serr != nil {
+			ok(false, "daemon cannot start: %v", serr)
+		} else {
+			resp, err = daemon.Call(cfg, &daemon.Request{Op: daemon.OpPing}, time.Second)
+		}
+	}
 	if err == nil {
 		_ = json.Unmarshal(resp.Data, &ping)
 		ok(ping.Version == daemon.Version, "daemon running, pid %d, version %s (binary %s)", ping.PID, ping.Version, daemon.Version)
@@ -63,8 +71,8 @@ func cmdDoctor(args []string) int {
 		} else {
 			ok(false, "stats: %v", err)
 		}
-	} else {
-		fmt.Println("     daemon not running; the next hook (or any amem command) starts it")
+	} else if !daemon.IsUnavailable(err) {
+		ok(false, "daemon does not answer: %v", err)
 	}
 	if st, err := os.Stat(cfg.SpoolPath()); err == nil {
 		ok(st.Size() == 0, "spool has %d bytes waiting", st.Size())
