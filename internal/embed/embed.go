@@ -268,7 +268,7 @@ func (x *Index) backfill(ctx context.Context) (int, error) {
 			return 0, err
 		}
 		ids, pids = append(ids, id), append(pids, pid)
-		texts = append(texts, clip(title+"\n"+body, 2000))
+		texts = append(texts, clip(title+"\n"+body, cmp.Or(x.cfg.MaxChars, 600)))
 	}
 	rows.Close()
 	if len(ids) == 0 {
@@ -304,7 +304,7 @@ func (x *Index) backfill(ctx context.Context) (int, error) {
 func (x *Index) Search(ctx context.Context, text string, scope store.Scope, k int) ([]recall.VecHit, error) {
 	ctx, cancel := context.WithTimeout(ctx, 300*time.Millisecond)
 	defer cancel()
-	vecs, err := x.emb.Embed(ctx, []string{clip(text, 2000)})
+	vecs, err := x.emb.Embed(ctx, []string{clip(text, cmp.Or(x.cfg.MaxChars, 600))})
 	if err != nil {
 		return nil, err
 	}

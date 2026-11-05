@@ -100,6 +100,8 @@ type EmbedConfig struct {
 	Model     string   `toml:"model"`
 	BatchSize int      `toml:"batch_size"`
 	IdleGap   Duration `toml:"idle_gap"`
+	// MaxChars clips text before embedding; most small models see only ~128-512 tokens anyway.
+	MaxChars int `toml:"max_chars"`
 }
 
 func Default() *Config {
@@ -132,7 +134,7 @@ func Default() *Config {
 			IdleFlush:   Duration{60 * time.Second},
 			Timeout:     Duration{3 * time.Minute},
 		},
-		Embed: EmbedConfig{Kind: "none", BatchSize: 32, IdleGap: Duration{5 * time.Second}},
+		Embed: EmbedConfig{Kind: "none", BatchSize: 32, IdleGap: Duration{5 * time.Second}, MaxChars: 600},
 	}
 }
 
