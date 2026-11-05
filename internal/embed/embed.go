@@ -19,6 +19,7 @@ import (
 	"slices"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/tazhate/agent-mem/internal/config"
@@ -26,6 +27,9 @@ import (
 	"github.com/tazhate/agent-mem/internal/recall"
 	"github.com/tazhate/agent-mem/internal/store"
 )
+
+// ErrBadInput marks an input the embedder rejects for what it is (not an outage).
+var ErrBadInput = errors.New("embedder rejected the input")
 
 type Embedder interface {
 	Model() string
@@ -78,7 +82,12 @@ func (o *openAI) Embed(ctx context.Context, texts []string) ([][]float32, error)
 		return nil, err
 	}
 	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("embeddings HTTP %d: %.300s", resp.StatusCode, raw)
+		err := fmt.Errorf("embeddings HTTP %d: %.300s", resp.StatusCode, raw)
+		switch resp.StatusCode {
+		case http.StatusBadRequest, http.StatusRequestEntityTooLarge, http.StatusUnprocessableEntity:
+			return nil, errors.Join(ErrBadInput, err)
+		}
+		return nil, err
 	}
 	var out struct {
 		Data []struct {
@@ -144,13 +153,14 @@ func encode(q []int8) []byte {
 
 // Index is the in-memory sign-bit index plus the background embedder.
 type Index struct {
-	st    *store.Store
-	emb   Embedder
-	cfg   config.EmbedConfig
-	log   *slog.Logger
-	idle  func() time.Time
-	wake  chan struct{}
-	ready chan struct{}
+	st     *store.Store
+	emb    Embedder
+	cfg    config.EmbedConfig
+	log    *slog.Logger
+	idle   func() time.Time
+	wake   chan struct{}
+	ready  chan struct{}
+	reload atomic.Bool
 
 	mu       sync.RWMutex
 	dim      int
@@ -165,7 +175,10 @@ func NewIndex(st *store.Store, emb Embedder, cfg config.EmbedConfig, log *slog.L
 	return &Index{st: st, emb: emb, cfg: cfg, log: log, idle: lastActivity, wake: make(chan struct{}, 1), ready: make(chan struct{})}
 }
 
-func (x *Index) Kick(string, event.Kind) {
+func (x *Index) Kick(_ string, kind event.Kind) {
+	if kind == event.Reindex {
+		x.reload.Store(true)
+	}
 	select {
 	case x.wake <- struct{}{}:
 	default:
@@ -180,7 +193,16 @@ func (x *Index) Run(ctx context.Context) {
 		x.log.Error("load vectors", "err", err)
 	}
 	close(x.ready)
+	lastLoad := time.Now()
 	for {
+		// The in-memory index caches project ids and keeps superseded entries; rebuild it after
+		// bulk changes and once an hour.
+		if x.reload.Swap(false) || time.Since(lastLoad) > time.Hour {
+			if err := x.load(ctx); err != nil {
+				x.log.Warn("reload vectors", "err", err)
+			}
+			lastLoad = time.Now()
+		}
 		n, err := x.backfill(ctx)
 		if err != nil {
 			x.log.Warn("embed backfill", "err", err)
@@ -203,11 +225,12 @@ func (x *Index) Run(ctx context.Context) {
 
 func (x *Index) load(ctx context.Context) error {
 	rows, err := x.st.DB().QueryContext(ctx, `SELECT v.memory_id, coalesce(m.project_id, 0), v.dim, v.q FROM vectors v
-		JOIN memories m ON m.id = v.memory_id WHERE v.model = ? AND m.private = 0 AND m.superseded_by IS NULL`, x.emb.Model())
+		JOIN memories m ON m.id = v.memory_id WHERE v.model = ? AND v.dim > 0 AND m.private = 0 AND m.superseded_by IS NULL`, x.emb.Model())
 	if err != nil {
 		return err
 	}
 	defer rows.Close()
+	fresh := &Index{}
 	n := 0
 	for rows.Next() {
 		var id, pid int64
@@ -216,11 +239,17 @@ func (x *Index) load(ctx context.Context) error {
 		if err := rows.Scan(&id, &pid, &dim, &q); err != nil {
 			return err
 		}
-		x.add(id, pid, bytesToInt8(q))
+		fresh.add(id, pid, bytesToInt8(q))
 		n++
 	}
+	if err := rows.Err(); err != nil {
+		return err
+	}
+	x.mu.Lock()
+	x.dim, x.words, x.ids, x.projects, x.bits = fresh.dim, fresh.words, fresh.ids, fresh.projects, fresh.bits
+	x.mu.Unlock()
 	x.log.Info("vectors loaded", "count", n, "model", x.emb.Model(), "dim", x.dim)
-	return rows.Err()
+	return nil
 }
 
 func bytesToInt8(b []byte) []int8 {
@@ -268,7 +297,7 @@ func (x *Index) backfill(ctx context.Context) (int, error) {
 			return 0, err
 		}
 		ids, pids = append(ids, id), append(pids, pid)
-		texts = append(texts, clip(title+"\n"+body, cmp.Or(x.cfg.MaxChars, 600)))
+		texts = append(texts, clip(title+"\n"+body, x.cfg.MaxChars))
 	}
 	rows.Close()
 	if len(ids) == 0 {
@@ -276,7 +305,27 @@ func (x *Index) backfill(ctx context.Context) (int, error) {
 	}
 	vecs, err := x.emb.Embed(ctx, texts)
 	if err != nil {
-		return 0, err
+		if !errors.Is(err, ErrBadInput) {
+			return 0, err // outage or auth problem: retry the batch later, mark nothing
+		}
+		// One bad input must not stall the whole backfill: retry one by one and mark the
+		// inputs the embedder keeps rejecting with an empty vector, so they are skipped.
+		if len(texts) == 1 {
+			if mErr := x.markFailed(ctx, ids[0]); mErr != nil {
+				return 0, mErr
+			}
+			x.log.Warn("embedding failed, memory skipped", "memory", ids[0], "err", err)
+			return 1, nil
+		}
+		stored := 0
+		for i := range ids {
+			n, err := x.embedOne(ctx, ids[i], pids[i], texts[i])
+			if err != nil {
+				return stored, err
+			}
+			stored += n
+		}
+		return stored, nil
 	}
 	qs := make([][]int8, len(vecs))
 	scales := make([]float32, len(vecs))
@@ -300,11 +349,40 @@ func (x *Index) backfill(ctx context.Context) (int, error) {
 	return len(ids), nil
 }
 
+func (x *Index) embedOne(ctx context.Context, id, pid int64, text string) (int, error) {
+	vecs, err := x.emb.Embed(ctx, []string{text})
+	if err != nil || len(vecs) != 1 {
+		if err != nil && !errors.Is(err, ErrBadInput) {
+			return 0, err
+		}
+		x.log.Warn("embedding failed, memory skipped", "memory", id, "err", err)
+		return 1, x.markFailed(ctx, id)
+	}
+	q, scale := Quantize(vecs[0])
+	if err := x.st.Write(ctx, func(tx *sql.Tx) error {
+		_, err := tx.ExecContext(ctx, `INSERT OR REPLACE INTO vectors(memory_id, model, dim, scale, q) VALUES (?, ?, ?, ?, ?)`,
+			id, x.emb.Model(), len(q), scale, encode(q))
+		return err
+	}); err != nil {
+		return 0, err
+	}
+	x.add(id, pid, q)
+	return 1, nil
+}
+
+// markFailed stores an empty vector so backfill moves on; load skips dim 0.
+func (x *Index) markFailed(ctx context.Context, id int64) error {
+	return x.st.Write(ctx, func(tx *sql.Tx) error {
+		_, err := tx.ExecContext(ctx, `INSERT OR REPLACE INTO vectors(memory_id, model, dim, scale, q) VALUES (?, ?, 0, 0, x'')`, id, x.emb.Model())
+		return err
+	})
+}
+
 // Search implements recall.VectorSearcher.
 func (x *Index) Search(ctx context.Context, text string, scope store.Scope, k int) ([]recall.VecHit, error) {
 	ctx, cancel := context.WithTimeout(ctx, 300*time.Millisecond)
 	defer cancel()
-	vecs, err := x.emb.Embed(ctx, []string{clip(text, cmp.Or(x.cfg.MaxChars, 600))})
+	vecs, err := x.emb.Embed(ctx, []string{clip(text, x.cfg.MaxChars)})
 	if err != nil {
 		return nil, err
 	}
@@ -429,6 +507,9 @@ func down(h []cand, i int) {
 }
 
 func clip(s string, n int) string {
+	if n <= 0 {
+		return s
+	}
 	r := []rune(s)
 	if len(r) <= n {
 		return s

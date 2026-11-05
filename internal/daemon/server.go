@@ -168,7 +168,7 @@ func (s *Server) Run(ctx context.Context, foreground bool) error {
 
 func (s *Server) drainSpool(ctx context.Context) {
 	n, err := SpoolDrain(s.cfg.SpoolPath(), func(ev *event.Event) error {
-		_, err := s.ingest(ctx, ev, false)
+		_, _, err := s.ingest(ctx, ev, false)
 		return err
 	})
 	if err != nil {
@@ -198,6 +198,14 @@ func (s *Server) idleExit(ctx context.Context) {
 }
 
 func (s *Server) janitor(ctx context.Context) {
+	if need, err := s.st.NeedsReindex(ctx); err == nil && need {
+		start := time.Now()
+		if n, err := s.st.Reindex(ctx); err != nil {
+			s.log.Error("fts reindex", "err", err)
+		} else {
+			s.log.Info("fts reindexed for new tokenizer rules", "memories", n, "took", time.Since(start).Round(time.Millisecond))
+		}
+	}
 	t := time.NewTicker(6 * time.Hour)
 	defer t.Stop()
 	for {
@@ -227,44 +235,61 @@ func (s *Server) serve(ctx context.Context, conn net.Conn) {
 	}
 	var req Request
 	resp := Response{V: ProtocolVersion}
+	var after func()
 	if err := json.Unmarshal(line, &req); err != nil {
 		resp.Error = "bad request: " + err.Error()
 	} else {
 		s.touch()
-		resp = s.handle(ctx, &req)
+		resp, after = s.handle(ctx, &req)
 	}
 	b, _ := json.Marshal(resp)
-	_, _ = conn.Write(append(b, '\n'))
-	if req.Version != "" && req.Version != Version && s.restart.CompareAndSwap(false, true) {
-		s.log.Info("client version differs, exiting so the new binary takes over", "client", req.Version, "daemon", Version)
+	if _, err := conn.Write(append(b, '\n')); err == nil && after != nil {
+		// Only count memories as shown once the hook actually received them.
+		after()
+	}
+	if s.shouldRestart(&req) && s.restart.CompareAndSwap(false, true) {
+		s.log.Info("exiting so the new binary takes over", "client", req.Version, "daemon", Version, "op", req.Op)
 		go func() { time.Sleep(200 * time.Millisecond); s.cancel() }()
 	}
 }
 
-func (s *Server) handle(ctx context.Context, req *Request) Response {
+// shouldRestart: an explicit restart request, or a different build of this same binary file
+// (it was replaced on disk). Other installed copies of amem never restart the daemon, so two
+// versions side by side cannot make it flap.
+func (s *Server) shouldRestart(req *Request) bool {
+	if req.Op == OpRestart {
+		return true
+	}
+	return req.Version != "" && req.Version != Version && req.Exe != "" && req.Exe == selfExe()
+}
+
+func (s *Server) handle(ctx context.Context, req *Request) (Response, func()) {
 	resp := Response{V: ProtocolVersion, OK: true}
 	var data any
 	var err error
+	var after func()
 	switch req.Op {
 	case OpPing:
-		data = map[string]any{"version": Version, "pid": os.Getpid()}
+		data = map[string]any{"version": Version, "pid": os.Getpid(), "exe": selfExe(), "warnings": s.cfg.Warnings}
+	case OpRestart:
+		data = map[string]any{"restarting": true}
 	case OpEvent:
 		if req.Event == nil {
 			err = errors.New("missing event")
 			break
 		}
-		resp.Context, err = s.ingest(ctx, req.Event, !req.NoContext)
+		resp.Context, after, err = s.ingest(ctx, req.Event, !req.NoContext)
 	default:
 		data, err = s.api(ctx, req.Op, req.Params)
 	}
 	if err != nil {
 		s.log.Error("request failed", "op", req.Op, "err", err)
-		return Response{V: ProtocolVersion, Error: err.Error()}
+		return Response{V: ProtocolVersion, Error: err.Error()}, nil
 	}
 	if data != nil {
 		resp.Data, _ = json.Marshal(data)
 	}
-	return resp
+	return resp, after
 }
 
 // projectFor resolves and caches the project id of a cwd.
@@ -283,31 +308,42 @@ func (s *Server) projectFor(ctx context.Context, cwd string) (int64, project.Inf
 	s.mu.Lock()
 	s.projects[info.Key] = id
 	first := !s.adopted[id]
-	s.adopted[id] = true
 	s.mu.Unlock()
 	if first && info.Git {
-		if merged, err := s.st.AdoptLegacy(ctx, id, info.Name); err == nil && merged {
+		merged, err := s.st.AdoptLegacy(ctx, id, info.Name)
+		if err == nil {
+			s.mu.Lock()
+			s.adopted[id] = true // only after success, so a failed merge is retried
+			s.mu.Unlock()
+		}
+		if merged {
 			s.log.Info("adopted imported project", "name", info.Name, "key", info.Key)
+			for _, w := range s.workers {
+				w.Kick("", event.Reindex) // vector index caches project ids
+			}
 		}
 	}
 	return id, info, nil
 }
 
-var ownTool = regexp.MustCompile(`(^|__)(memory_search|memory_get|memory_timeline|memory_save|work_state)$`)
+// ownTool matches amem's MCP tools under any runtime's naming: memory_get, mcp__amem__memory_get
+// (Claude Code, Codex), mcp_amem_memory_get (Gemini CLI), amem_memory_get (OpenCode).
+var ownTool = regexp.MustCompile(`(^|_)(memory_search|memory_get|memory_timeline|memory_save|work_state)$`)
 
-// ingest stores an event and, when the runtime can take it, returns context to inject.
-func (s *Server) ingest(ctx context.Context, ev *event.Event, live bool) (string, error) {
+// ingest stores an event and, when the runtime can take it, returns context to inject plus a
+// commit func that records the injection once the answer reached the hook.
+func (s *Server) ingest(ctx context.Context, ev *event.Event, live bool) (string, func(), error) {
 	if ev.TS == 0 {
 		ev.TS = event.NowMS()
 	}
 	sid := ev.SessionID()
 	pid, info, err := s.projectFor(ctx, ev.Cwd)
 	if err != nil {
-		return "", err
+		return "", nil, err
 	}
 	// Cheap duplicate check before the expensive cleaning (redelivery after a hook timeout).
 	if seen, err := s.st.SeenEvent(ctx, ev.ID); err == nil && seen {
-		return "", nil
+		return "", nil, nil
 	}
 	privatePrompt := s.clean(ev)
 
@@ -356,10 +392,10 @@ func (s *Server) ingest(ctx context.Context, ev *event.Event, live bool) (string
 		_, err = s.st.InsertEvent(ctx, tx, toRow(ev, sid, turn))
 		return err
 	}); err != nil {
-		return "", err
+		return "", nil, err
 	}
 	if dup {
-		return "", nil
+		return "", nil, nil
 	}
 
 	if !inPrivate {
@@ -373,24 +409,27 @@ func (s *Server) ingest(ctx context.Context, ev *event.Event, live bool) (string
 	}
 
 	if !live || !ev.Kind.WantsContext() || s.cfg.Recall.Mode == "off" || isOwn {
-		return "", nil
+		return "", nil, nil
 	}
 	res, err := s.rec.Recall(ctx, recall.Request{Event: ev, SessionID: sid, ProjectID: pid, ProjectName: info.Name})
 	if err != nil {
 		s.log.Warn("recall", "err", err)
-		return "", nil
+		return "", nil, nil
 	}
 	if len(res.Items) == 0 && res.Text == "" {
-		return "", nil
+		return "", nil, nil
 	}
 	shadow := s.cfg.Recall.Mode == "shadow"
-	if err := s.st.RecordInjections(ctx, sid, res.Trigger, res.Items, shadow); err != nil {
-		s.log.Warn("record injections", "err", err)
+	commit := func() {
+		if err := s.st.RecordInjections(context.WithoutCancel(ctx), sid, res.Trigger, res.Items, shadow); err != nil {
+			s.log.Warn("record injections", "err", err)
+		}
 	}
 	if shadow {
-		return "", nil
+		commit()
+		return "", nil, nil
 	}
-	return res.Text, nil
+	return res.Text, commit, nil
 }
 
 func toRow(ev *event.Event, sid string, turn int) store.EventRow {
@@ -501,7 +540,7 @@ var citeRe = regexp.MustCompile(`#(\d{1,9})\b`)
 func (s *Server) feedback(ctx context.Context, ev *event.Event, sid string, own bool) {
 	var ids []int64
 	switch {
-	case own && ev.Tool != nil && strings.HasSuffix(ev.Tool.Name, "memory_get") && ev.Kind == event.ToolPost:
+	case own && ev.Tool != nil && strings.HasSuffix(ev.Tool.Name, "memory_get") && (ev.Kind == event.ToolPost || ev.Kind == event.ToolPre):
 		var in struct {
 			IDs []int64 `json:"ids"`
 		}

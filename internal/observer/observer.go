@@ -85,6 +85,9 @@ func (o *Observer) provider(ctx context.Context) (provider.Provider, error) {
 		return nil, fmt.Errorf("observer provider unavailable")
 	}
 	ch, err := provider.NewChain(ctx, o.cfg.Providers)
+	if err == nil {
+		ch.Timeout = o.cfg.Timeout.Duration
+	}
 	if err != nil {
 		o.provErr = time.Now()
 		o.log.Warn("observer has no provider; events stay queued", "err", err)
@@ -174,10 +177,16 @@ func (o *Observer) process(ctx context.Context, sid string, force bool) {
 	}
 	for _, chunk := range chunks(turns, o.cfg.BatchChars) {
 		if err := o.observe(ctx, prov, sess, chunk); err != nil {
-			o.fails[sid]++
-			wait := min(time.Duration(1<<min(o.fails[sid], 6))*30*time.Second, 30*time.Minute)
-			o.backoff[sid] = time.Now().Add(wait)
-			o.log.Warn("observer failed; will retry", "session", sid, "retry_in", wait, "err", err)
+			if o.fail(sid, err) {
+				// Give up on this chunk (e.g. a turn the model keeps rejecting) so the session's
+				// later work is not blocked behind it forever.
+				var skipped []int64
+				for _, t := range chunk {
+					skipped = append(skipped, idsByTurn[t.n]...)
+				}
+				_ = o.st.MarkProcessed(ctx, skipped)
+				o.log.Error("observer gave up on a batch", "session", sid, "events", len(skipped), "err", err)
+			}
 			return
 		}
 		// Mark each chunk as soon as it is stored: a later failure must not resend it and
@@ -199,8 +208,6 @@ func (o *Observer) observe(ctx context.Context, prov provider.Provider, sess sto
 	proj, _ := o.st.ProjectByID(ctx, sess.ProjectID)
 	existing := o.related(ctx, sess.ProjectID, turns)
 	user := renderBatch(proj.Name, turns, existing)
-	ctx, cancel := context.WithTimeout(ctx, o.cfg.Timeout.Duration)
-	defer cancel()
 	start := time.Now()
 	raw, err := prov.Complete(ctx, provider.Request{
 		System: systemPrompt(o.cfg.Language), User: user, Schema: memorySchema, SchemaName: "memories", MaxTokens: 4096,
@@ -272,8 +279,31 @@ func (o *Observer) related(ctx context.Context, projectID int64, turns []turn) [
 	return out
 }
 
+// maxFailures is how many consecutive failures a session's batch or summary gets before it
+// is skipped.
+const maxFailures = 6
+
+// fail records a failure with exponential backoff and reports whether to give up.
+func (o *Observer) fail(key string, err error) bool {
+	o.fails[key]++
+	n := o.fails[key]
+	if n >= maxFailures {
+		delete(o.fails, key)
+		delete(o.backoff, key)
+		return true
+	}
+	wait := min(time.Duration(1<<min(n, 6))*30*time.Second, 30*time.Minute)
+	o.backoff[key] = time.Now().Add(wait)
+	o.log.Warn("observer call failed; will retry", "key", key, "retry_in", wait, "err", err)
+	return false
+}
+
 func (o *Observer) summarize(ctx context.Context, sid string) {
 	if !o.cfg.Enabled {
+		return
+	}
+	key := "summary:" + sid
+	if time.Now().Before(o.backoff[key]) {
 		return
 	}
 	prompts, err := o.st.SessionPrompts(ctx, sid, 100)
@@ -305,18 +335,19 @@ func (o *Observer) summarize(ctx context.Context, sid string) {
 	if last != "" {
 		b.WriteString("\nLAST ASSISTANT MESSAGE:\n" + clip(last, 3000) + "\n")
 	}
-	ctx, cancel := context.WithTimeout(ctx, o.cfg.Timeout.Duration)
-	defer cancel()
 	raw, err := prov.Complete(ctx, provider.Request{System: summaryPrompt(o.cfg.Language), User: b.String(), Schema: summarySchema, SchemaName: "summary", MaxTokens: 2048})
-	if err != nil {
-		o.log.Warn("summary failed", "session", sid, "err", err)
-		return
-	}
 	var su store.Summary
-	if err := json.Unmarshal(raw, &su); err != nil {
-		o.log.Warn("summary decode", "err", err)
+	if err == nil {
+		err = json.Unmarshal(raw, &su)
+	}
+	if err != nil {
+		if o.fail(key, err) {
+			// Stop retrying this session; without this a bad session costs one LLM call per scan.
+			_ = o.st.MarkSummarized(ctx, sid)
+		}
 		return
 	}
+	delete(o.fails, key)
 	su.SessionID, su.ProjectID, su.ID = sid, sess.ProjectID, 0
 	if err := o.st.InsertSummary(ctx, &su); err != nil {
 		o.log.Warn("summary store", "err", err)

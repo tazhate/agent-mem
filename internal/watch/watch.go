@@ -5,9 +5,12 @@ package watch
 import (
 	"bufio"
 	"context"
+	"crypto/sha256"
 	"database/sql"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"os"
 	"path/filepath"
@@ -34,8 +37,8 @@ type FileState struct {
 }
 
 type pendingTool struct {
-	name  string
-	input json.RawMessage
+	Name  string          `json:"name"`
+	Input json.RawMessage `json:"input,omitempty"`
 }
 
 type Preset struct {
@@ -103,13 +106,17 @@ func (w *Watcher) pass(ctx context.Context) error {
 
 func (w *Watcher) follow(ctx context.Context, path string, info os.FileInfo) error {
 	var offset, size int64
-	var session, cwd string
+	var session, cwd, pending string
 	var sub bool
-	err := w.st.DB().QueryRowContext(ctx, `SELECT offset, size, session, cwd, subagent FROM watch_state WHERE path = ?`, path).
-		Scan(&offset, &size, &session, &cwd, &sub)
+	err := w.st.DB().QueryRowContext(ctx, `SELECT offset, size, session, cwd, subagent, pending FROM watch_state WHERE path = ?`, path).
+		Scan(&offset, &size, &session, &cwd, &sub, &pending)
 	if errors.Is(err, sql.ErrNoRows) {
 		if info.ModTime().Before(w.Since) {
-			return w.save(ctx, &FileState{Path: path}, info.Size(), info.Size())
+			// Skip the history but learn the session header, so a resumed session that only
+			// appends new lines is still attributed.
+			fs := &FileState{Path: path, pending: map[string]pendingTool{}}
+			w.readHeader(path, fs)
+			return w.save(ctx, fs, info.Size(), info.Size())
 		}
 		offset = 0
 	} else if err != nil {
@@ -133,6 +140,7 @@ func (w *Watcher) follow(ctx context.Context, path string, info os.FileInfo) err
 	if fs == nil {
 		// Restore what earlier lines established (session id, cwd) so a restart resumes mid-file.
 		fs = &FileState{Path: path, Session: session, Cwd: cwd, pending: map[string]pendingTool{}}
+		_ = json.Unmarshal([]byte(pending), &fs.pending)
 		if sub {
 			fs.pending["__subagent"] = pendingTool{}
 		}
@@ -144,9 +152,12 @@ func (w *Watcher) follow(ctx context.Context, path string, info os.FileInfo) err
 		if len(line) > 0 && line[len(line)-1] != '\n' {
 			break // partial line still being written; read it next pass
 		}
+		lineAt := offset
 		offset += int64(len(line))
 		if !fs.SkipFile {
-			for _, ev := range w.preset.Parser.Line(fs, line) {
+			for i, ev := range w.preset.Parser.Line(fs, line) {
+				// Stable identity from position: replaying after a crash dedupes in the daemon.
+				ev.ID = stableID(path, lineAt, i)
 				if w.SubagentsOnly && !fs.SkipFile && ev.AgentType == "" {
 					continue
 				}
@@ -164,16 +175,46 @@ func (w *Watcher) follow(ctx context.Context, path string, info os.FileInfo) err
 
 func (w *Watcher) save(ctx context.Context, fs *FileState, offset, size int64) error {
 	_, sub := fs.pending["__subagent"]
+	pending, _ := json.Marshal(fs.pending) // calls whose results are still to come
 	return w.st.Write(ctx, func(tx *sql.Tx) error {
-		_, err := tx.ExecContext(ctx, `INSERT INTO watch_state(path, offset, size, session, cwd, subagent) VALUES (?, ?, ?, ?, ?, ?)
+		_, err := tx.ExecContext(ctx, `INSERT INTO watch_state(path, offset, size, session, cwd, subagent, pending) VALUES (?, ?, ?, ?, ?, ?, ?)
 			ON CONFLICT(path) DO UPDATE SET offset = excluded.offset, size = excluded.size, session = excluded.session,
-			cwd = excluded.cwd, subagent = excluded.subagent`, fs.Path, offset, size, fs.Session, fs.Cwd, sub)
+			cwd = excluded.cwd, subagent = excluded.subagent, pending = excluded.pending`, fs.Path, offset, size, fs.Session, fs.Cwd, sub, string(pending))
 		return err
 	})
 }
 
+// readHeader parses the first lines of a file for session metadata only.
+func (w *Watcher) readHeader(path string, fs *FileState) {
+	f, err := os.Open(path)
+	if err != nil {
+		return
+	}
+	defer f.Close()
+	r := bufio.NewReaderSize(f, 1<<20)
+	for range 50 {
+		line, err := r.ReadBytes('\n')
+		if len(line) > 0 {
+			w.preset.Parser.Line(fs, line) // events are discarded; only fs fields matter here
+			for k := range fs.pending {
+				if k != "__subagent" {
+					delete(fs.pending, k)
+				}
+			}
+		}
+		if err != nil || fs.Session != "" {
+			return
+		}
+	}
+}
+
+func stableID(path string, offset int64, i int) string {
+	h := sha256.Sum256(fmt.Appendf(nil, "%s\x00%d\x00%d", path, offset, i))
+	return "w" + hex.EncodeToString(h[:12])
+}
+
 func ev(fs *FileState, runtime string, kind event.Kind, ts int64) *event.Event {
-	return &event.Event{ID: event.NewID(), Runtime: runtime, NativeSession: fs.Session, Cwd: fs.Cwd, Kind: kind, TS: ts}
+	return &event.Event{Runtime: runtime, NativeSession: fs.Session, Cwd: fs.Cwd, Kind: kind, TS: ts}
 }
 
 func parseTS(s string) int64 {
@@ -250,7 +291,7 @@ func (claudeParser) Line(fs *FileState, line []byte) []*event.Event {
 				}
 				delete(fs.pending, b.ToolUseID)
 				kind := event.ToolPost
-				t := &event.Tool{Name: call.name, UseID: b.ToolUseID, Input: call.input, Output: contentText(b.Content)}
+				t := &event.Tool{Name: call.Name, UseID: b.ToolUseID, Input: call.Input, Output: contentText(b.Content)}
 				if b.IsError {
 					kind, t.Error = event.ToolFail, t.Output
 				}
@@ -265,7 +306,7 @@ func (claudeParser) Line(fs *FileState, line []byte) []*event.Event {
 			case "text":
 				fs.lastText = b.Text
 			case "tool_use":
-				fs.pending[b.ID] = pendingTool{name: b.Name, input: b.Input}
+				fs.pending[b.ID] = pendingTool{Name: b.Name, Input: b.Input}
 			}
 		}
 		if rec.Message.StopReason == "end_turn" {
@@ -373,7 +414,7 @@ func (codexParser) Line(fs *FileState, line []byte) []*event.Event {
 		if len(in) == 0 || !json.Valid(in) {
 			in = p.Input
 		}
-		fs.pending[p.CallID] = pendingTool{name: p.Name, input: in}
+		fs.pending[p.CallID] = pendingTool{Name: p.Name, Input: in}
 	case rec.Type == "response_item" && (p.Type == "function_call_output" || p.Type == "custom_tool_call_output"):
 		call, ok := fs.pending[p.CallID]
 		if !ok {
@@ -381,7 +422,7 @@ func (codexParser) Line(fs *FileState, line []byte) []*event.Event {
 		}
 		delete(fs.pending, p.CallID)
 		e := ev(fs, "codex", event.ToolPost, ts)
-		e.Tool = &event.Tool{Name: call.name, UseID: p.CallID, Input: call.input, Output: contentText(p.Output)}
+		e.Tool = &event.Tool{Name: call.Name, UseID: p.CallID, Input: call.Input, Output: contentText(p.Output)}
 		return []*event.Event{mark(e)}
 	case rec.Type == "event_msg" && p.Type == "task_complete":
 		e := ev(fs, "codex", event.TurnEnd, ts)

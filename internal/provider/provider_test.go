@@ -1,6 +1,7 @@
 package provider
 
 import (
+	"context"
 	"encoding/json"
 	"io"
 	"net/http"
@@ -10,6 +11,7 @@ import (
 	"strings"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/tazhate/agent-mem/internal/config"
 )
@@ -83,5 +85,75 @@ echo '{"type":"result","is_error":false,"result":"x","structured_output":{"ok":t
 	out, err := p.Complete(t.Context(), Request{System: "s", User: "u", Schema: schema})
 	if err != nil || string(out) != `{"ok":true}` {
 		t.Fatalf("%s %v", out, err)
+	}
+}
+
+func TestExtractJSONProseWithBraces(t *testing.T) {
+	for in, want := range map[string]string{
+		`Here is {the} answer: {"ok":true}`: `{"ok":true}`,
+		"{} then {\"ok\":true}":             `{"ok":true}`,
+		"```json\n{\"a\":{\"b\":1}}\n```":   `{"a":{"b":1}}`,
+		`{}`:                                `{}`,
+	} {
+		got, err := extractJSON(in)
+		if err != nil || string(got) != want {
+			t.Errorf("extractJSON(%q) = %s, %v; want %s", in, got, err, want)
+		}
+	}
+}
+
+func TestOpenAIMaxCompletionTokens(t *testing.T) {
+	var sawLegacy bool
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var req map[string]any
+		json.NewDecoder(r.Body).Decode(&req)
+		if _, ok := req["max_tokens"]; ok {
+			sawLegacy = true
+		}
+		if _, ok := req["max_completion_tokens"]; !ok {
+			t.Error("max_completion_tokens not sent")
+		}
+		w.Write([]byte(`{"choices":[{"message":{"content":"{\"ok\":true}"}}]}`))
+	}))
+	defer srv.Close()
+	p, _ := New(t.Context(), config.ProviderConfig{Kind: "openai", BaseURL: srv.URL})
+	if _, err := p.Complete(t.Context(), Request{Schema: schema, MaxTokens: 100}); err != nil || sawLegacy {
+		t.Fatalf("err=%v legacy=%v", err, sawLegacy)
+	}
+}
+
+func TestExecKillsProcessGroup(t *testing.T) {
+	dir := t.TempDir()
+	script := filepath.Join(dir, "hang")
+	// A grandchild keeps stdout open; without killing the group Run would wait for it.
+	os.WriteFile(script, []byte("#!/bin/sh\nsleep 30 &\nsleep 30\n"), 0o755)
+	p, _ := New(t.Context(), config.ProviderConfig{Kind: "exec", Command: []string{script}})
+	ctx, cancel := context.WithTimeout(t.Context(), 300*time.Millisecond)
+	defer cancel()
+	start := time.Now()
+	if _, err := p.Complete(ctx, Request{Schema: schema}); err == nil {
+		t.Fatal("expected timeout error")
+	}
+	if d := time.Since(start); d > 3*time.Second {
+		t.Fatalf("exec timeout took %s", d)
+	}
+}
+
+func TestChainPerProviderTimeout(t *testing.T) {
+	slow := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		select {
+		case <-r.Context().Done():
+		case <-time.After(5 * time.Second):
+		}
+	}))
+	defer slow.Close()
+	ok := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Write([]byte(`{"choices":[{"message":{"content":"{\"ok\":true}"}}]}`))
+	}))
+	defer ok.Close()
+	ch, _ := NewChain(t.Context(), []config.ProviderConfig{{Kind: "openai", BaseURL: slow.URL}, {Kind: "openai", BaseURL: ok.URL}})
+	ch.Timeout = 300 * time.Millisecond
+	if out, err := ch.Complete(t.Context(), Request{Schema: schema}); err != nil || string(out) != `{"ok":true}` {
+		t.Fatalf("fallback after timeout: %s %v", out, err)
 	}
 }

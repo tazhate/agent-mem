@@ -137,7 +137,20 @@ func InsertMemoryTx(ctx context.Context, tx *sql.Tx, m *Memory) (id int64, creat
 		err = tx.QueryRowContext(ctx, `SELECT id FROM memories WHERE hash = ?
 			UNION ALL SELECT id FROM memories WHERE origin = ? AND origin_id = ? LIMIT 1`,
 			m.Hash(), m.Origin, m.OriginID).Scan(&id)
-		return id, false, err
+		if err != nil {
+			return id, false, err
+		}
+		// Learned again after being replaced: the same knowledge is current again.
+		if !m.Private && m.Origin != "claude-mem" {
+			res, err := tx.ExecContext(ctx, `UPDATE memories SET superseded_by = NULL, updated_at = ? WHERE id = ? AND superseded_by IS NOT NULL`, now, id)
+			if err != nil {
+				return id, false, err
+			}
+			if n, _ := res.RowsAffected(); n > 0 {
+				return id, true, nil
+			}
+		}
+		return id, false, nil
 	}
 	if err != nil {
 		return 0, false, err
@@ -151,7 +164,7 @@ func InsertMemoryTx(ctx context.Context, tx *sql.Tx, m *Memory) (id int64, creat
 		return 0, false, err
 	}
 	for _, f := range m.Files {
-		if _, err = tx.ExecContext(ctx, `INSERT OR IGNORE INTO memory_files(memory_id, path) VALUES (?, ?)`, id, f); err != nil {
+		if _, err = tx.ExecContext(ctx, `INSERT OR IGNORE INTO memory_files(memory_id, path, base) VALUES (?, ?, ?)`, id, f, filepath.Base(f)); err != nil {
 			return 0, false, err
 		}
 	}
@@ -186,8 +199,8 @@ func (s *Store) UpdateMemory(ctx context.Context, id int64, title, body string, 
 			m.Facts = facts
 		}
 		if _, err := tx.ExecContext(ctx, `UPDATE memories SET title = ?, body = ?, facts = ?, hash = ?, updated_at = ? WHERE id = ?`,
-			m.Title, m.Body, jsonList(m.Facts), m.Hash()+fmt.Sprintf("-%d", id), time.Now().UnixMilli(), id); err != nil {
-			return err
+			m.Title, m.Body, jsonList(m.Facts), m.Hash(), time.Now().UnixMilli(), id); err != nil {
+			return fmt.Errorf("update memory %d (an identical memory may exist): %w", id, err)
 		}
 		if _, err := tx.ExecContext(ctx, `DELETE FROM memories_fts WHERE rowid = ?`, id); err != nil {
 			return err
@@ -372,8 +385,8 @@ func (s *Store) ByFiles(ctx context.Context, paths []string, sc Scope, limit int
 	args := []any{}
 	var cond []string
 	for _, p := range paths {
-		cond = append(cond, `f.path = ? OR f.path LIKE ?`)
-		args = append(args, p, "%/"+filepath.Base(p))
+		cond = append(cond, `f.path = ? OR f.base = ?`)
+		args = append(args, p, filepath.Base(p))
 	}
 	where := sc.where(&args)
 	args = append(args, limit)
@@ -643,4 +656,65 @@ func (s *Store) scrubTable(ctx context.Context, table string, cols []string, cle
 			return total, err
 		}
 	}
+}
+
+// ftsVersion changes whenever stemming or indexed text changes; a mismatch triggers Reindex.
+const ftsVersion = "2" // 2: ё folded to е
+
+func (s *Store) NeedsReindex(ctx context.Context) (bool, error) {
+	v, err := s.Meta(ctx, "fts_version")
+	if err != nil {
+		return false, err
+	}
+	if v == "" {
+		var n int
+		if err := s.db.QueryRowContext(ctx, `SELECT count(*) FROM memories`).Scan(&n); err != nil {
+			return false, err
+		}
+		if n == 0 { // fresh database: indexed with current rules from the start
+			return false, s.SetMeta(ctx, "fts_version", ftsVersion)
+		}
+	}
+	return v != ftsVersion, nil
+}
+
+// Reindex rebuilds the FTS index and stem frequencies from the memories table.
+func (s *Store) Reindex(ctx context.Context) (int, error) {
+	if err := s.Write(ctx, func(tx *sql.Tx) error {
+		_, err := tx.ExecContext(ctx, `DELETE FROM memories_fts`)
+		return err
+	}); err != nil {
+		return 0, err
+	}
+	n := 0
+	var last int64
+	for {
+		mems, err := s.queryMemories(ctx, `WHERE m.id > ? ORDER BY m.id LIMIT 2000`, last)
+		if err != nil {
+			return n, err
+		}
+		if len(mems) == 0 {
+			break
+		}
+		last = mems[len(mems)-1].ID
+		if err := s.Write(ctx, func(tx *sql.Tx) error {
+			for _, m := range mems {
+				if _, err := tx.ExecContext(ctx, `INSERT INTO memories_fts(rowid, title, body) VALUES (?, ?, ?)`,
+					m.ID, stem.Text(m.Title), stem.Text(ftsBody(m))); err != nil {
+					return err
+				}
+			}
+			return nil
+		}); err != nil {
+			return n, err
+		}
+		n += len(mems)
+	}
+	if err := s.OptimizeFTS(ctx); err != nil {
+		return n, err
+	}
+	if err := s.RebuildDF(ctx); err != nil {
+		return n, err
+	}
+	return n, s.SetMeta(ctx, "fts_version", ftsVersion)
 }

@@ -9,6 +9,7 @@ import (
 	"net"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"syscall"
 	"time"
 
@@ -18,6 +19,9 @@ import (
 // Call sends one request and waits for the answer within timeout.
 func Call(cfg *config.Config, req *Request, timeout time.Duration) (*Response, error) {
 	req.V, req.Version = ProtocolVersion, Version
+	if req.Exe == "" {
+		req.Exe = selfExe()
+	}
 	deadline := time.Now().Add(timeout)
 	conn, err := net.DialTimeout("unix", cfg.SocketPath(), min(timeout, 200*time.Millisecond))
 	if err != nil {
@@ -95,6 +99,7 @@ func Spawn(cfg *config.Config) error {
 	}
 	defer logf.Close()
 	cmd := exec.Command(exe, "daemon")
+	cmd.Dir = "/" // do not pin whatever directory the first hook ran in
 	cmd.Stdout, cmd.Stderr = logf, logf
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setsid: true}
 	cmd.Env = append(os.Environ(), "AMEM_DISABLE=1") // children of the daemon (CLI observers) must not re-enter hooks
@@ -114,4 +119,16 @@ func WaitReady(cfg *config.Config, timeout time.Duration) bool {
 		time.Sleep(25 * time.Millisecond)
 	}
 	return false
+}
+
+// selfExe is the resolved path of the running binary.
+func selfExe() string {
+	exe, err := os.Executable()
+	if err != nil {
+		return ""
+	}
+	if p, err := filepath.EvalSymlinks(exe); err == nil {
+		return p
+	}
+	return exe
 }

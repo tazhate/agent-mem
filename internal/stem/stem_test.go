@@ -25,3 +25,9 @@ func TestQuery(t *testing.T) {
 		}
 	}
 }
+
+func TestYoFolding(t *testing.T) {
+	if Text("отчёт") != Text("отчет") || Text("Ёлка") != Text("елка") {
+		t.Fatalf("%q %q", Text("отчёт"), Text("отчет"))
+	}
+}

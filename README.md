@@ -61,7 +61,7 @@ During the migration:
 
 Chroma is not migrated. MiniLM vectors do poorly on Russian, and the embedder you pick recomputes them.
 
-On a 750 MB database the import takes about 1.5 minutes.
+On a 750 MB database the import takes 1.5-2.5 minutes. Every imported text field goes through the same redaction as live capture. If you imported with an older version, run `amem scrub --dry-run` and then `amem scrub` to clean what is already stored.
 
 Switchover order:
 
@@ -79,10 +79,13 @@ Switchover order:
 | `amem save [--global] [--type T] text` | manual note; `--global` makes it visible in every project |
 | `amem doctor [--probe]` | daemon, hooks, provider, embedder, spool |
 | `amem stats` | database counters |
-| `amem watch --preset claude\|codex` | transcripts for runtimes without hooks (or `--subagents-only` for Codex) |
-| `amem bench recall\|hook` | latency on your own database |
+| `amem watch --preset claude\|codex` | transcripts for runtimes without hooks (`--subagents-only` works with `codex` only) |
+| `amem scrub [--dry-run]` | re-apply the current redaction rules to everything already stored |
+| `amem bench recall\|hook` | latency on your own database (`hook` runs against a scratch daemon) |
 
-MCP tools for the agent: `memory_search`, `memory_get`, `memory_timeline`, `memory_save`, `work_state`. The daemon can also serve them over streamable HTTP if `daemon.http_addr` is set in the config.
+MCP tools for the agent: `memory_search`, `memory_get`, `memory_timeline`, `memory_save`, `work_state`. Private memories are never returned to agents; `amem show` still prints them for you.
+
+The daemon can also serve the tools over streamable HTTP if `daemon.http_addr` is set in the config. Only loopback addresses are accepted, and every request needs `Authorization: Bearer <token>` with the token from `~/.local/share/amem/http.token` (created on first start, mode 0600).
 
 ## Files
 
@@ -93,8 +96,9 @@ MCP tools for the agent: `memory_search`, `memory_get`, `memory_timeline`, `memo
 | `~/.local/share/amem/amemd.sock` | daemon socket |
 | `~/.local/share/amem/spool.jsonl` | events while the daemon is unavailable |
 | `~/.local/share/amem/amemd.log` | daemon log |
+| `~/.local/share/amem/http.token` | bearer token for HTTP MCP, only when `daemon.http_addr` is set |
 
-`AMEM_HOME` moves everything to another directory: config, database, socket. That makes it easy to run tests next to a working installation. `AMEM_DISABLE=1` turns hooks off in the current environment; the observer sets it for its own CLI processes to avoid recursion.
+Database files are kept at mode 0600. `AMEM_HOME` moves everything to another directory: config, database, socket. That makes it easy to run tests next to a working installation. `AMEM_DISABLE=1` turns hooks off in the current environment; the observer sets it for its own CLI processes to avoid recursion.
 
 ## How it works
 

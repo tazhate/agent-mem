@@ -39,6 +39,8 @@ type Config struct {
 	Embed    EmbedConfig    `toml:"embed"`
 
 	path string
+	// Warnings lists invalid settings that Load replaced with safe values.
+	Warnings []string `toml:"-"`
 }
 
 type DaemonConfig struct {
@@ -179,7 +181,74 @@ func Load() (*Config, error) {
 		return nil, fmt.Errorf("config %s: %w", c.path, err)
 	}
 	c.DataDir = expand(cmp.Or(c.DataDir, Home()))
+	c.validate()
 	return c, nil
+}
+
+// validate replaces invalid values with safe ones and records why.
+func (c *Config) validate() {
+	warn := func(format string, a ...any) { c.Warnings = append(c.Warnings, fmt.Sprintf(format, a...)) }
+	d := Default()
+	if !filepath.IsAbs(c.DataDir) {
+		warn("data_dir %q is not absolute; using %s", c.DataDir, Home())
+		c.DataDir = Home()
+	}
+	switch c.Recall.Mode {
+	case "on", "shadow", "off":
+	default:
+		// Unknown means the user wanted something other than "on"; do not keep injecting.
+		warn("recall.mode %q is not on/shadow/off; recall is off", c.Recall.Mode)
+		c.Recall.Mode = "off"
+	}
+	if f := c.Recall.VectorFloor; f < 0 || f >= 0.95 {
+		warn("recall.vector_floor %v outside [0, 0.95); using %v", f, d.Recall.VectorFloor)
+		c.Recall.VectorFloor = d.Recall.VectorFloor
+	}
+	if c.Embed.MaxChars <= 0 {
+		if c.Embed.MaxChars < 0 {
+			warn("embed.max_chars %d must be positive; using %d", c.Embed.MaxChars, d.Embed.MaxChars)
+		}
+		c.Embed.MaxChars = d.Embed.MaxChars
+	}
+	if c.Embed.BatchSize <= 0 {
+		c.Embed.BatchSize = d.Embed.BatchSize
+	}
+	if c.Capture.MaxFieldChars <= 0 {
+		c.Capture.MaxFieldChars = d.Capture.MaxFieldChars
+	}
+	for _, v := range []*int{&c.Recall.PromptLimit, &c.Recall.FileLimit, &c.Recall.ErrorLimit, &c.Recall.StartTokens, &c.Recall.CompactTokens, &c.Recall.SessionBudgetTokens} {
+		if *v < 0 {
+			*v = 0
+		}
+	}
+	if c.Observer.BatchEvents <= 0 {
+		c.Observer.BatchEvents = d.Observer.BatchEvents
+	}
+	if c.Observer.BatchChars <= 0 {
+		c.Observer.BatchChars = d.Observer.BatchChars
+	}
+	if c.Observer.Timeout.Duration <= 0 {
+		c.Observer.Timeout = d.Observer.Timeout
+	}
+	if c.Observer.IdleFlush.Duration <= 0 {
+		c.Observer.IdleFlush = d.Observer.IdleFlush
+	}
+	switch c.Embed.Kind {
+	case "", "none", "openai":
+	default:
+		warn("embed.kind %q is not none/openai; embeddings are off", c.Embed.Kind)
+		c.Embed.Kind = "none"
+	}
+}
+
+// Fallback returns defaults for when the config file cannot be parsed, so hooks and the
+// daemon agree on paths and keep working; the error is reported by `amem doctor`.
+func Fallback(err error) *Config {
+	c := Default()
+	c.DataDir = Home()
+	c.path = Path()
+	c.Warnings = []string{"config not loaded, running on defaults: " + err.Error()}
+	return c
 }
 
 func (c *Config) File() string { return c.path }

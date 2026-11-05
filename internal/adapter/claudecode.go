@@ -66,7 +66,7 @@ func parseSnake(runtime string, kinds map[string]event.Kind, hookArg string, raw
 		AgentID:        p.AgentID,
 		AgentType:      p.AgentType,
 		TranscriptPath: p.TranscriptPath,
-		LastAssistant:  p.LastAssistantMessage,
+		LastAssistant:  firstNonEmpty(p.LastAssistantMessage, text(p.PromptResponse)),
 		Model:          p.Model,
 		TS:             event.NowMS(),
 	}

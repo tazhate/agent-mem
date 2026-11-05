@@ -235,10 +235,11 @@ func (s *Store) MarkSummarized(ctx context.Context, sessionID string) error {
 	})
 }
 
-// SessionPrompts returns the user prompts of a session, oldest first.
+// SessionPrompts returns the latest user prompts of a session, oldest first.
 func (s *Store) SessionPrompts(ctx context.Context, sessionID string, limit int) ([]string, error) {
+	// Newest first with the limit, then reversed: callers want the latest requests in order.
 	rows, err := s.db.QueryContext(ctx, `SELECT input FROM events WHERE session_id = ? AND kind = 'prompt' AND input IS NOT NULL
-		ORDER BY id LIMIT ?`, sessionID, limit)
+		ORDER BY id DESC LIMIT ?`, sessionID, limit)
 	if err != nil {
 		return nil, err
 	}
@@ -251,6 +252,7 @@ func (s *Store) SessionPrompts(ctx context.Context, sessionID string, limit int)
 		}
 		out = append(out, p)
 	}
+	slices.Reverse(out)
 	return out, rows.Err()
 }
 

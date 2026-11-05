@@ -21,13 +21,16 @@ const (
 	SubagentStart Kind = "subagent_start"
 	SubagentStop  Kind = "subagent_stop"
 	SessionEnd    Kind = "session_end"
+
+	// Reindex is an internal signal to workers: memories changed project or visibility in bulk.
+	Reindex Kind = "reindex"
 )
 
 // WantsContext reports whether the runtime can receive injected context for this kind,
 // so the hook has to wait for recall instead of fire-and-forget.
 func (k Kind) WantsContext() bool {
 	switch k {
-	case SessionStart, Prompt, ToolPre, ToolPost, ToolFail, SubagentStart:
+	case SessionStart, Prompt, ToolPre, ToolPost, ToolFail, SubagentStart, Compact:
 		return true
 	}
 	return false

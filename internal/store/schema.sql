@@ -87,6 +87,7 @@ CREATE UNIQUE INDEX IF NOT EXISTS memories_origin ON memories(origin, origin_id)
 CREATE TABLE IF NOT EXISTS memory_files (
 	memory_id INTEGER NOT NULL,
 	path      TEXT NOT NULL,
+	base      TEXT NOT NULL DEFAULT '',  -- file name, so other checkouts of the repo match too
 	PRIMARY KEY (memory_id, path)
 ) WITHOUT ROWID;
 CREATE INDEX IF NOT EXISTS memory_files_path ON memory_files(path);

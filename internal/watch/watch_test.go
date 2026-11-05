@@ -53,3 +53,34 @@ func TestCodexRollout(t *testing.T) {
 		t.Fatalf("incremental read: %+v", got)
 	}
 }
+
+func TestWatcherReplayIsStableAndResumesPending(t *testing.T) {
+	home := t.TempDir()
+	dir := filepath.Join(home, ".codex", "sessions")
+	os.MkdirAll(dir, 0o755)
+	path := filepath.Join(dir, "rollout-2.jsonl")
+	os.WriteFile(path, []byte(`{"timestamp":"2026-11-05T10:00:00Z","type":"session_meta","payload":{"id":"c2","cwd":"/r","source":"cli"}}
+{"timestamp":"2026-11-05T10:00:01Z","type":"response_item","payload":{"type":"function_call","call_id":"k9","name":"shell","arguments":"{}"}}
+`), 0o644)
+	st, _ := store.Open(filepath.Join(t.TempDir(), "w.db"))
+	defer st.Close()
+	var got []*event.Event
+	send := func(e *event.Event) error { got = append(got, e); return nil }
+	New(st, Presets["codex"], home, send).Run(t.Context(), 0, true)
+	// The result arrives after a watcher restart: the pending call must still be known.
+	f, _ := os.OpenFile(path, os.O_APPEND|os.O_WRONLY, 0)
+	f.WriteString(`{"timestamp":"2026-11-05T10:00:02Z","type":"response_item","payload":{"type":"function_call_output","call_id":"k9","output":"ok"}}` + "\n")
+	f.Close()
+	New(st, Presets["codex"], home, send).Run(t.Context(), 0, true)
+	if len(got) != 1 || got[0].Tool == nil || got[0].Tool.Name != "shell" {
+		t.Fatalf("pending call lost across restart: %+v", got)
+	}
+	// Replaying the same lines yields the same ids, so the daemon drops them as duplicates.
+	first := got[0].ID
+	st.DB().Exec(`DELETE FROM watch_state`)
+	got = nil
+	New(st, Presets["codex"], home, send).Run(t.Context(), 0, true)
+	if len(got) == 0 || got[len(got)-1].ID != first {
+		t.Fatalf("replay ids differ: %v vs %s", got, first)
+	}
+}

@@ -6,9 +6,12 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"runtime/pprof"
 	"slices"
+	"strconv"
 	"strings"
+	"syscall"
 	"time"
 
 	"github.com/tazhate/agent-mem/internal/recall"
@@ -92,13 +95,29 @@ func benchRecall(n int) int {
 	return 0
 }
 
-// benchHook runs the real binary as a PostToolUse hook against the running daemon.
+// benchHook runs the real binary as a PostToolUse hook against a scratch daemon in a temporary
+// AMEM_HOME, so the measurement never writes into the real memory database.
 func benchHook(n int) int {
 	exe, _ := os.Executable()
+	home, err := os.MkdirTemp("", "amem-bench-")
+	if err != nil {
+		return fail("%v", err)
+	}
+	defer os.RemoveAll(home)
+	os.WriteFile(filepath.Join(home, "config.toml"), []byte("[observer]\nenabled = false\n"), 0o600)
+	env := append(os.Environ(), "AMEM_HOME="+home)
+	defer func() {
+		if pid, err := os.ReadFile(filepath.Join(home, "amemd.lock")); err == nil {
+			if p, err := strconv.Atoi(strings.TrimSpace(string(pid))); err == nil {
+				syscall.Kill(p, syscall.SIGTERM)
+			}
+		}
+	}()
 	payload := `{"session_id":"bench","cwd":"/tmp","hook_event_name":"PostToolUse","tool_name":"Bash","tool_input":{"command":"true"},"tool_response":{"stdout":""}}`
 	var lat []time.Duration
 	for i := range n {
 		cmd := exec.Command(exe, "hook", "claude-code")
+		cmd.Env = env
 		cmd.Stdin = strings.NewReader(payload)
 		t := time.Now()
 		if err := cmd.Run(); err != nil {

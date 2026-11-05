@@ -70,6 +70,7 @@ type payload struct {
 	AgentType            string          `json:"agent_type"`
 	TranscriptPath       string          `json:"transcript_path"`
 	LastAssistantMessage string          `json:"last_assistant_message"`
+	PromptResponse       json.RawMessage `json:"prompt_response"` // Gemini CLI AfterAgent
 	TurnID               string          `json:"turn_id"`
 	Model                string          `json:"model"`
 	Command              string          `json:"command"`
@@ -109,7 +110,7 @@ func text(raw json.RawMessage) string {
 			if out, ok := shellOutput(m); ok {
 				return out
 			}
-			for _, k := range []string{"output", "content", "result", "text", "message"} {
+			for _, k := range []string{"llmContent", "returnDisplay", "output", "content", "result", "text", "message"} {
 				if v, ok := m[k]; ok {
 					if s := text(v); s != "" {
 						return s
@@ -225,6 +226,15 @@ func toolFromPayload(p *payload) *event.Tool {
 		Output:   text(resp),
 		ExitCode: exitCode(resp),
 		Error:    text(p.Error),
+	}
+	// Gemini CLI reports failures inside the response: {"llmContent": ..., "error": {...}}.
+	if t.Error == "" {
+		var nested struct {
+			Error json.RawMessage `json:"error"`
+		}
+		if json.Unmarshal(resp, &nested) == nil && len(nested.Error) > 0 && string(nested.Error) != "null" {
+			t.Error = text(nested.Error)
+		}
 	}
 	return t
 }
