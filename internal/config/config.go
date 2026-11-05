@@ -98,7 +98,9 @@ type ProviderConfig struct {
 }
 
 type EmbedConfig struct {
-	// Kind is "none" or "openai" (any OpenAI-compatible /v1/embeddings: Ollama, LM Studio, OpenAI...).
+	// Kind is "none", "static" (built-in model2vec model, no service; Model names a directory
+	// under <data_dir>/models or an absolute path) or "openai" (any OpenAI-compatible
+	// /v1/embeddings: Ollama, LM Studio, OpenAI...).
 	Kind      string   `toml:"kind"`
 	BaseURL   string   `toml:"base_url"`
 	Key       string   `toml:"key"`
@@ -234,9 +236,9 @@ func (c *Config) validate() {
 		c.Observer.IdleFlush = d.Observer.IdleFlush
 	}
 	switch c.Embed.Kind {
-	case "", "none", "openai":
+	case "", "none", "openai", "static":
 	default:
-		warn("embed.kind %q is not none/openai; embeddings are off", c.Embed.Kind)
+		warn("embed.kind %q is not none/static/openai; embeddings are off", c.Embed.Kind)
 		c.Embed.Kind = "none"
 	}
 }
@@ -274,6 +276,7 @@ func (c *Config) SocketPath() string { return filepath.Join(c.DataDir, "amemd.so
 func (c *Config) SpoolPath() string  { return filepath.Join(c.DataDir, "spool.jsonl") }
 func (c *Config) LockPath() string   { return filepath.Join(c.DataDir, "amemd.lock") }
 func (c *Config) LogPath() string    { return filepath.Join(c.DataDir, "amemd.log") }
+func (c *Config) ModelsDir() string  { return filepath.Join(c.DataDir, "models") }
 
 // Resolve expands a secret reference: "env:NAME", "cmd:shell command", "file:path" or a literal.
 func Resolve(ctx context.Context, ref string) (string, error) {

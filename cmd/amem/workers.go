@@ -15,7 +15,7 @@ func attachWorkers(cfg *config.Config, srv *daemon.Server, log *slog.Logger) {
 	if cfg.Observer.Enabled {
 		srv.AddWorker(observer.New(srv.Store(), cfg.Observer, srv.Recall(), log.With("worker", "observer")))
 	}
-	emb, err := embed.NewEmbedder(context.Background(), cfg.Embed)
+	emb, err := embed.NewEmbedder(context.Background(), cfg.Embed, cfg.ModelsDir())
 	if err != nil {
 		log.Error("embedder disabled", "err", err)
 		return

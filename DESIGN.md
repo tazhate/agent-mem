@@ -102,13 +102,13 @@ One vector per record (title + body), not 10-26. That alone cuts the load 15-20 
 
 The embedder is an interface with three implementations:
 
-- `none` - the default. FTS5 only, zero CPU. On short technical notes BM25 with stemming works well.
+- `none` - FTS5 only, zero CPU. On short technical notes BM25 with stemming works well.
+- `static` - a model2vec static model evaluated in process, pure Go. The default is `minishlab/potion-multilingual-128M` (101 languages, 256 dims, bge-m3 tokenizer). There is no neural network at inference: Unigram tokenization, the mean of the token vectors, normalization. The 512 MB weight matrix is memory-mapped, so only rows of tokens that occur are paged in. About 660 memories per second on one core, so 108k memories take 3-4 minutes; a query takes about 1 ms. Tokens and vectors match the Python `model2vec` reference exactly.
 - `openai` - any OpenAI-compatible `/v1/embeddings`: Ollama, LM Studio, vLLM, OpenAI, Voyage through a proxy.
-- `local` - a built-in model via ONNX. Only in a cgo build, behind a separate build tag.
 
-For mixed Russian and English text the suggested default is `bge-m3` or `multilingual-e5-small` through Ollama. MiniLM won't do.
+Why static by default: a transformer through Ollama (`bge-m3`, `paraphrase-multilingual`) separates relevant from random text better, but on a laptop CPU it needed 30-100 ms per query and around 14 hours for 108k memories with three cores busy. The static model trades some quality for no service and almost no CPU. Measured on real memories with a Russian query: relevant memories 0.25-0.64 cosine, random ones median 0.13 and p95 0.24, hence `recall.vector_floor = 0.25` for it (0.40 suits transformer models).
 
-Embedding runs in the background: one goroutine, `nice 19`, batches of 32, paused while hooks are running. Each vector records its model. Changing the model triggers background re-embedding with a rate limit, and old vectors keep working until they are replaced.
+Embedding runs in the background: one goroutine, small batches, paused while hooks are running. Each vector records its model. Switching models drops the old model's vectors and re-embeds newest first.
 
 ### Russian in FTS5
 
@@ -291,7 +291,7 @@ internal/store/      schema, migrations, queries
 internal/recall/     FTS, vectors, scoring, budgets
 internal/observer/   batching, prefilter, prompt, JSON schema
 internal/provider/   openai, anthropic, exec
-internal/embed/      none, openai, local (build tag)
+internal/embed/      none, static (model2vec), openai; vector index
 internal/daemon/     socket, spool, lifecycle, API
 internal/mcpserver/  tools, HTTP with bearer token
 internal/importer/   claudemem
@@ -319,7 +319,7 @@ After stage 3 the system can already be turned on: claude-mem memory is migrated
 
 The open questions were settled like this:
 
-- **The user picks the embedder and the compressor** in `amem init`. Embedder: `none`, Ollama, or any OpenAI-compatible `/v1/embeddings`. Observer: a subscription CLI (`claude`, `codex`, `gemini`) or an API key (Anthropic, OpenAI-compatible). Keys are stored as `env:`, `cmd:`, `file:` references.
+- **The user picks the embedder and the compressor** in `amem init`. Embedder: `none`, the built-in static model (default), Ollama, or any OpenAI-compatible `/v1/embeddings`. Observer: a subscription CLI (`claude`, `codex`, `gemini`) or an API key (Anthropic, OpenAI-compatible). Keys are stored as `env:`, `cmd:`, `file:` references.
 - **Global memory**: only `preference` with `global=true` from the observer, and explicit `memory_save --global`.
 - **No sync between machines in v1.**
 
