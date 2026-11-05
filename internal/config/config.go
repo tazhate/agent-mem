@@ -1,0 +1,240 @@
+// Package config loads amem settings from TOML and resolves secret references.
+package config
+
+import (
+	"cmp"
+	"context"
+	"errors"
+	"fmt"
+	"io/fs"
+	"os"
+	"os/exec"
+	"path/filepath"
+	"strings"
+	"time"
+
+	"github.com/BurntSushi/toml"
+)
+
+// Duration is a time.Duration that decodes from TOML strings like "30m".
+type Duration struct{ time.Duration }
+
+func (d *Duration) UnmarshalText(b []byte) error {
+	v, err := time.ParseDuration(string(b))
+	if err != nil {
+		return err
+	}
+	d.Duration = v
+	return nil
+}
+
+func (d Duration) MarshalText() ([]byte, error) { return []byte(d.String()), nil }
+
+type Config struct {
+	DataDir  string         `toml:"data_dir"`
+	Daemon   DaemonConfig   `toml:"daemon"`
+	Capture  CaptureConfig  `toml:"capture"`
+	Recall   RecallConfig   `toml:"recall"`
+	Observer ObserverConfig `toml:"observer"`
+	Embed    EmbedConfig    `toml:"embed"`
+
+	path string
+}
+
+type DaemonConfig struct {
+	IdleExit Duration `toml:"idle_exit"`
+	// HTTPAddr enables streamable-HTTP MCP on this address, e.g. "127.0.0.1:37800".
+	HTTPAddr string `toml:"http_addr"`
+}
+
+type CaptureConfig struct {
+	SkipTools     []string `toml:"skip_tools"`
+	MaxFieldChars int      `toml:"max_field_chars"`
+	Redact        bool     `toml:"redact"`
+	RedactGeneric bool     `toml:"redact_generic"`
+	// RawRetention is how long raw events are kept after the observer processed them.
+	RawRetention Duration `toml:"raw_retention"`
+}
+
+type RecallConfig struct {
+	// Mode is "on", "shadow" (compute and log, never inject) or "off".
+	Mode                string  `toml:"mode"`
+	SessionBudgetTokens int     `toml:"session_budget_tokens"`
+	StartTokens         int     `toml:"start_tokens"`
+	CompactTokens       int     `toml:"compact_tokens"`
+	PromptLimit         int     `toml:"prompt_limit"`
+	FileLimit           int     `toml:"file_limit"`
+	ErrorLimit          int     `toml:"error_limit"`
+	MinPromptChars      int     `toml:"min_prompt_chars"`
+	MinScore            float64 `toml:"min_score"`
+	GlobalPreferences   bool    `toml:"global_preferences"`
+}
+
+type ObserverConfig struct {
+	Enabled     bool             `toml:"enabled"`
+	Language    string           `toml:"language"`
+	BatchEvents int              `toml:"batch_events"`
+	BatchChars  int              `toml:"batch_chars"`
+	IdleFlush   Duration         `toml:"idle_flush"`
+	Timeout     Duration         `toml:"timeout"`
+	Providers   []ProviderConfig `toml:"providers"`
+}
+
+// ProviderConfig describes one LLM backend. Kind is "anthropic", "openai" or "exec".
+type ProviderConfig struct {
+	Name    string   `toml:"name"`
+	Kind    string   `toml:"kind"`
+	BaseURL string   `toml:"base_url"`
+	Key     string   `toml:"key"`
+	Model   string   `toml:"model"`
+	Command []string `toml:"command"`
+	// MaxTokens caps the response for HTTP providers.
+	MaxTokens int `toml:"max_tokens"`
+}
+
+type EmbedConfig struct {
+	// Kind is "none" or "openai" (any OpenAI-compatible /v1/embeddings: Ollama, LM Studio, OpenAI...).
+	Kind      string   `toml:"kind"`
+	BaseURL   string   `toml:"base_url"`
+	Key       string   `toml:"key"`
+	Model     string   `toml:"model"`
+	BatchSize int      `toml:"batch_size"`
+	IdleGap   Duration `toml:"idle_gap"`
+}
+
+func Default() *Config {
+	return &Config{
+		Daemon: DaemonConfig{IdleExit: Duration{30 * time.Minute}},
+		Capture: CaptureConfig{
+			SkipTools:     []string{"TodoWrite", "AskUserQuestion", "Skill", "SlashCommand", "ListMcpResourcesTool", "ToolSearch"},
+			MaxFieldChars: 16000,
+			Redact:        true,
+			RedactGeneric: true,
+			RawRetention:  Duration{30 * 24 * time.Hour},
+		},
+		Recall: RecallConfig{
+			Mode:                "on",
+			SessionBudgetTokens: 6000,
+			StartTokens:         600,
+			CompactTokens:       800,
+			PromptLimit:         5,
+			FileLimit:           3,
+			ErrorLimit:          2,
+			MinPromptChars:      15,
+			MinScore:            0.3,
+			GlobalPreferences:   true,
+		},
+		Observer: ObserverConfig{
+			Enabled:     true,
+			Language:    "English",
+			BatchEvents: 40,
+			BatchChars:  120000,
+			IdleFlush:   Duration{60 * time.Second},
+			Timeout:     Duration{3 * time.Minute},
+		},
+		Embed: EmbedConfig{Kind: "none", BatchSize: 32, IdleGap: Duration{5 * time.Second}},
+	}
+}
+
+// Home returns the data directory: $AMEM_HOME, else $XDG_DATA_HOME/amem, else ~/.local/share/amem.
+func Home() string {
+	if h := os.Getenv("AMEM_HOME"); h != "" {
+		return h
+	}
+	if x := os.Getenv("XDG_DATA_HOME"); x != "" {
+		return filepath.Join(x, "amem")
+	}
+	home, _ := os.UserHomeDir()
+	return filepath.Join(home, ".local", "share", "amem")
+}
+
+// Path returns the config file path: $AMEM_CONFIG, else $AMEM_HOME/config.toml when AMEM_HOME
+// is set, else $XDG_CONFIG_HOME/amem/config.toml.
+func Path() string {
+	if p := os.Getenv("AMEM_CONFIG"); p != "" {
+		return p
+	}
+	if h := os.Getenv("AMEM_HOME"); h != "" {
+		return filepath.Join(h, "config.toml")
+	}
+	base := os.Getenv("XDG_CONFIG_HOME")
+	if base == "" {
+		home, _ := os.UserHomeDir()
+		base = filepath.Join(home, ".config")
+	}
+	return filepath.Join(base, "amem", "config.toml")
+}
+
+// Load reads the config file; a missing file yields defaults.
+func Load() (*Config, error) {
+	c := Default()
+	c.path = Path()
+	if _, err := toml.DecodeFile(c.path, c); err != nil && !errors.Is(err, fs.ErrNotExist) {
+		return nil, fmt.Errorf("config %s: %w", c.path, err)
+	}
+	c.DataDir = expand(cmp.Or(c.DataDir, Home()))
+	return c, nil
+}
+
+func (c *Config) File() string { return c.path }
+
+// Save writes the config with 0600 permissions.
+func (c *Config) Save(path string) error {
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		return err
+	}
+	f, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o600)
+	if err != nil {
+		return err
+	}
+	if err := toml.NewEncoder(f).Encode(c); err != nil {
+		f.Close()
+		return err
+	}
+	return f.Close()
+}
+
+func (c *Config) DBPath() string     { return filepath.Join(c.DataDir, "amem.db") }
+func (c *Config) SocketPath() string { return filepath.Join(c.DataDir, "amemd.sock") }
+func (c *Config) SpoolPath() string  { return filepath.Join(c.DataDir, "spool.jsonl") }
+func (c *Config) LockPath() string   { return filepath.Join(c.DataDir, "amemd.lock") }
+func (c *Config) LogPath() string    { return filepath.Join(c.DataDir, "amemd.log") }
+
+// Resolve expands a secret reference: "env:NAME", "cmd:shell command", "file:path" or a literal.
+func Resolve(ctx context.Context, ref string) (string, error) {
+	switch {
+	case ref == "":
+		return "", nil
+	case strings.HasPrefix(ref, "env:"):
+		name := strings.TrimPrefix(ref, "env:")
+		v := os.Getenv(name)
+		if v == "" {
+			return "", fmt.Errorf("env %s is empty", name)
+		}
+		return v, nil
+	case strings.HasPrefix(ref, "cmd:"):
+		ctx, cancel := context.WithTimeout(ctx, 15*time.Second)
+		defer cancel()
+		out, err := exec.CommandContext(ctx, "sh", "-c", strings.TrimPrefix(ref, "cmd:")).Output()
+		if err != nil {
+			return "", fmt.Errorf("secret command: %w", err)
+		}
+		return strings.TrimSpace(string(out)), nil
+	case strings.HasPrefix(ref, "file:"):
+		b, err := os.ReadFile(expand(strings.TrimPrefix(ref, "file:")))
+		if err != nil {
+			return "", err
+		}
+		return strings.TrimSpace(string(b)), nil
+	default:
+		return ref, nil
+	}
+}
+
+func expand(p string) string {
+	if rest, ok := strings.CutPrefix(p, "~/"); ok {
+		home, _ := os.UserHomeDir()
+		return filepath.Join(home, rest)
+	}
+	return p
+}

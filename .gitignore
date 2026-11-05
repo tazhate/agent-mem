@@ -1,0 +1,9 @@
+/amem
+/bin/
+/dist/
+*.db
+*.db-wal
+*.db-shm
+.claude/
+.cursor/
+.aider/
