@@ -11,6 +11,7 @@ import (
 
 	"agent-mem/internal/config"
 	"agent-mem/internal/daemon"
+	"agent-mem/internal/mcpserver"
 	"agent-mem/internal/store"
 )
 
@@ -45,6 +46,9 @@ func cmdDaemon(args []string) int {
 
 	srv := daemon.New(cfg, st, log)
 	attachWorkers(cfg, srv, log)
+	srv.HTTP = mcpserver.HTTPHandler(func(op string, params, out any) error {
+		return srv.CallLocal(context.Background(), op, params, out)
+	})
 
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()

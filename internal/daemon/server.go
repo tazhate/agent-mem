@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"log/slog"
 	"net"
+	"net/http"
 	"os"
 	"regexp"
 	"slices"
@@ -45,6 +46,8 @@ type Server struct {
 	red     *redact.Redactor
 	log     *slog.Logger
 	workers []Worker
+	// HTTP serves extra endpoints (streamable-HTTP MCP) on cfg.Daemon.HTTPAddr when set.
+	HTTP http.Handler
 
 	lastActivity atomic.Int64
 	restart      atomic.Bool
@@ -134,7 +137,16 @@ func (s *Server) Run(ctx context.Context, foreground bool) error {
 	if !foreground && s.cfg.Daemon.IdleExit.Duration > 0 {
 		wg.Go(func() { s.idleExit(ctx) })
 	}
-	s.log.Info("amemd listening", "socket", sock, "version", Version, "pid", os.Getpid())
+	if s.HTTP != nil && s.cfg.Daemon.HTTPAddr != "" {
+		hs := &http.Server{Addr: s.cfg.Daemon.HTTPAddr, Handler: s.HTTP, ReadHeaderTimeout: 10 * time.Second}
+		context.AfterFunc(ctx, func() { hs.Close() })
+		wg.Go(func() {
+			if err := hs.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
+				s.log.Error("http", "err", err)
+			}
+		})
+	}
+	s.log.Info("amemd listening", "socket", sock, "http", s.cfg.Daemon.HTTPAddr, "version", Version, "pid", os.Getpid())
 
 	for {
 		conn, err := ln.Accept()

@@ -176,3 +176,21 @@ func firstLine(s string, n int) string {
 }
 
 func round2(f float64) float64 { return float64(int(f*100+0.5)) / 100 }
+
+// CallLocal runs an API op in process (used by the daemon's HTTP MCP endpoint).
+func (s *Server) CallLocal(ctx context.Context, op string, params, out any) error {
+	raw, err := json.Marshal(params)
+	if err != nil {
+		return err
+	}
+	s.touch()
+	data, err := s.api(ctx, op, raw)
+	if err != nil || out == nil {
+		return err
+	}
+	b, err := json.Marshal(data)
+	if err != nil {
+		return err
+	}
+	return json.Unmarshal(b, out)
+}
