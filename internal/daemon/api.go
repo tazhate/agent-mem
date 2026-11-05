@@ -1,6 +1,7 @@
 package daemon
 
 import (
+	"agent-mem/internal/event"
 	"cmp"
 	"context"
 	"encoding/json"
@@ -159,7 +160,7 @@ func (s *Server) api(ctx context.Context, op string, raw json.RawMessage) (any, 
 
 func (s *Server) kickEmbed() {
 	for _, w := range s.workers {
-		w.Kick("", false)
+		w.Kick("", event.Kind("memory_saved"))
 	}
 }
 

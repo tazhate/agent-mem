@@ -209,7 +209,8 @@ func (s *Store) LatestSummary(ctx context.Context, projectID int64, excludeSessi
 // UnsummarizedSessions returns ended or idle sessions of a project that have memories but no summary.
 func (s *Store) UnsummarizedSessions(ctx context.Context, idleBefore int64, limit int) ([]string, error) {
 	rows, err := s.db.QueryContext(ctx, `SELECT s.id FROM sessions s
-		WHERE s.summarized_at IS NULL AND s.origin IS NULL AND (s.ended_at IS NOT NULL OR s.last_event_at < ?)
+		WHERE (s.summarized_at IS NULL OR s.summarized_at < s.last_event_at) AND s.origin IS NULL
+		AND (s.ended_at IS NOT NULL OR s.last_event_at < ?)
 		AND EXISTS (SELECT 1 FROM events e WHERE e.session_id = s.id AND e.kind = 'prompt')
 		ORDER BY s.last_event_at DESC LIMIT ?`, idleBefore, limit)
 	if err != nil {
@@ -376,4 +377,15 @@ func nullInt(v int64) any {
 		return nil
 	}
 	return v
+}
+
+// LastAssistant returns the newest final assistant message recorded for a session.
+func (s *Store) LastAssistant(ctx context.Context, sessionID string) (string, error) {
+	var out string
+	err := s.db.QueryRowContext(ctx, `SELECT coalesce(output, '') FROM events WHERE session_id = ? AND kind = 'turn_end'
+		AND output IS NOT NULL ORDER BY id DESC LIMIT 1`, sessionID).Scan(&out)
+	if errors.Is(err, sql.ErrNoRows) {
+		return "", nil
+	}
+	return out, err
 }

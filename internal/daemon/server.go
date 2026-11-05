@@ -35,7 +35,7 @@ var ErrRunning = errors.New("daemon already running")
 // Worker is background work driven by the daemon (observer, embedder). Kick signals new input.
 type Worker interface {
 	Run(ctx context.Context)
-	Kick(sessionID string, final bool)
+	Kick(sessionID string, kind event.Kind)
 }
 
 type Server struct {
@@ -339,14 +339,9 @@ func (s *Server) ingest(ctx context.Context, ev *event.Event, live bool) (string
 
 	s.feedback(ctx, ev, sid, isOwn)
 
-	switch ev.Kind {
-	case event.TurnEnd, event.SessionEnd, event.Compact, event.SubagentStop:
+	if store {
 		for _, w := range s.workers {
-			w.Kick(sid, ev.Kind == event.SessionEnd)
-		}
-	case event.ToolPost, event.ToolFail, event.Prompt:
-		for _, w := range s.workers {
-			w.Kick(sid, false)
+			w.Kick(sid, ev.Kind)
 		}
 	}
 
