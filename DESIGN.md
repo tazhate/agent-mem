@@ -1,332 +1,332 @@
-# agent-mem: память агента на Go
+# agent-mem: agent memory in Go
 
-Бинарь - `amem`. Документ описывает концепцию и дизайн замены claude-mem 15.x. v1 реализован, установка и команды - в [README.md](README.md), отклонения от исходного дизайна - в разделе "Решения по итогам реализации".
+The binary is `amem`. This document covers the concept and design of a replacement for claude-mem 15.x. v1 is implemented; installation and commands are in [README.md](README.md), and departures from the original design are listed in the section "Decisions after implementation".
 
-## Диагноз claude-mem
+## Diagnosis of claude-mem
 
-Цифры сняты 05.11.2026 с живой установки (`~/.claude-mem/`, worker 15.4.0, плагин 15.6.0).
+Numbers were taken on 5 Nov 2026 from a live installation with about 108k memories (`~/.claude-mem/`, worker 15.4.0, plugin 15.6.0).
 
-| Что | Факт |
+| What | Fact |
 |---|---|
-| Объем кода | 151 тыс. строк TypeScript, 25 таблиц, 54 миграции |
-| chroma-mcp | 111% CPU, 2.9 ГБ RSS, 2.8 ГБ на диске; 44 падения процесса за сутки, после каждого индекс поднимается заново |
-| Векторизация | одно наблюдение = 10-26 документов в Chroma (narrative + каждый fact отдельно), каждый проходит через ONNX MiniLM на CPU |
-| Эмбеддинги | `all-MiniLM-L6-v2` - англоязычная модель, а заметки наполовину на русском |
-| Сессии | 15 757 наблюдений из 107 906 ссылаются на `memory_session_id`, которого нет в `sdk_sessions` |
-| Проекты | 315 проектов; worktree становятся отдельными проектами (например, `api/wt-feature` отдельно от `api`) |
-| Типы | режим задает 6 типов, в базе 100+ (`oddity`, `test-preparation`, `state-check`...) |
-| Обратная связь | `relevance_count = 0` у всех 107 906 записей - контур "запись пригодилась" не работает |
-| Процессы | на каждую сессию Claude Code отдельный `node -e <загрузчик>` для MCP (~48 МБ каждый); сжатие идет через Claude Agent SDK, то есть через полноценный CLI-подпроцесс |
-| Версии | воркер живет на 15.4.0 при установленной 15.6.0, маркер `CAPTURE_BROKEN` висит с 01.11, хотя захват работает |
+| Code size | 151k lines of TypeScript, 25 tables, 54 migrations |
+| chroma-mcp | 111% CPU, 2.9 GB RSS, 2.8 GB on disk; 44 process crashes in 24 hours, and the index is rebuilt after each one |
+| Vectorization | one observation = 10-26 documents in Chroma (narrative plus every fact separately), each one run through ONNX MiniLM on the CPU |
+| Embeddings | `all-MiniLM-L6-v2` is an English-only model, while half of the notes are in Russian |
+| Sessions | 15 757 of 107 906 observations point to a `memory_session_id` that does not exist in `sdk_sessions` |
+| Projects | 315 projects; worktrees become separate projects (for example, `api/wt-feature` apart from `api`) |
+| Types | the mode defines 6 types, the database holds 100+ (`oddity`, `test-preparation`, `state-check`...) |
+| Feedback | `relevance_count = 0` on all 107 906 records - the "this memory was useful" loop doesn't work |
+| Processes | every Claude Code session gets its own `node -e <loader>` for MCP (~48 MB each); compression goes through the Claude Agent SDK, which means a full CLI subprocess |
+| Versions | the worker runs 15.4.0 while 15.6.0 is installed, and the `CAPTURE_BROKEN` marker has been set since 1 Nov even though capture works |
 
-Корень почти всех проблем в трех решениях.
+Almost every problem traces back to three decisions.
 
-1. **Две базы вместо одной.** SQLite и Chroma синхронизируются через watermark, outbox и обработку битых сегментов. На это ушло 4.5 тыс. строк (`ChromaSync.ts` + `ChromaMcpManager.ts`), а сама связь идет по stdio MCP с Python-процессом. При 108 тыс. записей векторный индекс отдельным сервисом не нужен вовсе.
-2. **Идентичность памяти привязана к сессии LLM-провайдера.** `memorySessionId` выдает Agent SDK, и он меняется после рестарта воркера. Отсюда сироты, FK-хаки и отдельный документ `SESSION_ID_ARCHITECTURE.md` на 251 строку.
-3. **Сжатие на каждый вызов инструмента через долгоживущий агент.** Модель видит поток разрозненных tool call без намерения пользователя и пишет XML, который потом разбирается регулярками.
+1. **Two databases instead of one.** SQLite and Chroma are kept in sync through a watermark, an outbox and handling of corrupt segments. That took 4.5k lines (`ChromaSync.ts` + `ChromaMcpManager.ts`), and the link itself is stdio MCP to a Python process. At 108k records a vector index as a separate service isn't needed at all.
+2. **Memory identity is tied to the LLM provider's session.** `memorySessionId` is issued by the Agent SDK and changes after a worker restart. Hence the orphans, the FK hacks and a separate 251-line document, `SESSION_ID_ARCHITECTURE.md`.
+3. **Compression on every tool call through a long-lived agent.** The model sees a stream of scattered tool calls without the user's intent and writes XML that is later parsed with regexes.
 
-Recall при этом пассивный. На старте сессии внедряются 50 последних записей по времени, а не по релевантности, и дальше агент сам должен догадаться вызвать поиск. Вызывает он его редко.
+On top of that, recall is passive. At session start the 50 most recent records are injected, ordered by time rather than relevance, and after that the agent has to think of calling search on its own. It rarely does.
 
-## Принципы
+## Principles
 
-- **Один статический бинарь.** Без Node, Bun, Python, uvx, без `npx ... repair`. Обновление - замена файла и перезапуск демона.
-- **Одна база.** SQLite: данные, FTS5 и векторы в одном файле. Отдельного векторного сервиса нет.
-- **Хук никогда не ждет LLM.** Захват - это запись в очередь, а recall - локальный поиск без сети. Медленные операции (сжатие, эмбеддинги) идут фоном в демоне.
-- **Идентичность наша.** Сессия = `runtime:native_session_id`, проект = git-корень. Ничего не зависит от того, какой провайдер сжимает.
-- **Recall активный и экономный.** Память подсовывается в нужный момент (промпт, файл, ошибка), только выше порога релевантности и без повторов внутри сессии.
-- **Runtime и модель - это адаптеры, а не ядро.** Ядро не знает слова "Claude".
-- **Тишина при простое.** Ноль CPU, когда агенты не работают.
+- **One static binary.** No Node, Bun, Python, uvx, no `npx ... repair`. An update means replacing the file and restarting the daemon.
+- **One database.** SQLite: data, FTS5 and vectors in one file. No separate vector service.
+- **A hook never waits for an LLM.** Capture is a write to a queue, and recall is a local search with no network. Slow work (compression, embeddings) runs in the background inside the daemon.
+- **We own identity.** Session = `runtime:native_session_id`, project = git root. Nothing depends on which provider does the compression.
+- **Recall is active and frugal.** Memory is offered at the right moment (prompt, file, error), only above a relevance threshold and without repeats within a session.
+- **Runtime and model are adapters, not the core.** The core doesn't know the word "Claude".
+- **Silence when idle.** Zero CPU when no agents are working.
 
-## Архитектура
+## Architecture
 
 ```text
  runtime (Claude Code / Codex / Gemini CLI / Cursor / OpenCode / ...)
-   |  hooks: JSON на stdin            |  MCP (stdio или HTTP)
+   |  hooks: JSON on stdin            |  MCP (stdio or HTTP)
    v                                  v
- amem hook <event>               amem mcp  (тонкий прокси)
-   |  unix socket, таймаут 30 мс       |
-   |  нет демона -> spool.jsonl + spawn |
+ amem hook <event>               amem mcp  (thin proxy)
+   |  unix socket, 30 ms timeout      |
+   |  no daemon -> spool.jsonl + spawn |
    v                                  v
  +--------------------------------------------------+
- | amemd (один на пользователя)                     |
- |  ingest   -> нормализация, редакция секретов     |
- |  recall   -> FTS5 + векторы + скоринг, < 20 мс   |
- |  observer -> батч на ход, LLM, JSON schema       |
- |  embedder -> фоновая очередь, лимит CPU          |
- |  janitor  -> TTL сырых событий, консолидация     |
+ | amemd (one per user)                             |
+ |  ingest   -> normalization, secret redaction     |
+ |  recall   -> FTS5 + vectors + scoring, < 20 ms   |
+ |  observer -> batch per turn, LLM, JSON schema    |
+ |  embedder -> background queue, CPU limit         |
+ |  janitor  -> raw event TTL, consolidation        |
  +--------------------------------------------------+
    |
    v
- ~/.local/share/amem/amem.db   (SQLite WAL: данные + FTS5 + векторы)
+ ~/.local/share/amem/amem.db   (SQLite WAL: data + FTS5 + vectors)
 ```
 
-Подкоманды одного бинаря:
+Subcommands of the single binary:
 
-- `amem hook <event> --runtime <name>` - клиент для хуков. Старт Go-бинаря занимает 2-5 мс; цепочку node->bun у claude-mem надо замерить для сравнения на этапе 1.
-- `amemd` (`amem daemon`) - держит базу, очередь и векторы в памяти. Стартует лениво при первом хуке, умирает через N минут простоя или живет под systemd user unit.
-- `amem mcp` - stdio-прокси к демону, около 5 МБ RSS. Runtime, которые умеют MCP по HTTP, ходят в демон напрямую, без процесса на сессию.
-- `amem search`, `amem show <id>`, `amem import`, `amem doctor` - CLI для человека и скриптов.
+- `amem hook <runtime> [event]` - the hook client. A Go binary starts in 2-5 ms; claude-mem's node->bun chain was to be measured for comparison in stage 1.
+- `amemd` (`amem daemon`) - holds the database, the queue and the vectors in memory. Starts lazily on the first hook, exits after N minutes of idle time, or runs under a systemd user unit.
+- `amem mcp` - a stdio proxy to the daemon, about 5 MB RSS. Runtimes that speak MCP over HTTP go to the daemon directly, with no process per session.
+- `amem search`, `amem show <id>`, `amem import`, `amem doctor` - CLI for humans and scripts.
 
-Демон недоступен - хук дописывает событие в `spool.jsonl` (`O_APPEND`, одна строка) и выходит с кодом 0. Демон при старте выгребает spool. Хук не блокирует сессию ни при каких ошибках, кроме кривого собственного конфига.
+If the daemon is unavailable, the hook appends the event to `spool.jsonl` (`O_APPEND`, one line) and exits with code 0. On start the daemon drains the spool. The hook never blocks the session on any error except a broken config of its own.
 
-Версия протокола хук<->демон проверяется на каждом соединении. Расхождение - демон сам перезапускается из нового бинаря. Ситуация "воркер на 15.4.0, плагин на 15.6.0" исключена конструктивно.
+The hook<->daemon protocol version is checked on every connection. On a mismatch the daemon restarts itself from the new binary. A situation like "worker on 15.4.0, plugin on 15.6.0" is ruled out by design.
 
-## Хранилище и поиск
+## Storage and search
 
-### Схема (черновик)
+### Schema (draft)
 
 ```sql
-projects  (id, key UNIQUE, root, remote, name)          -- key = hash(git remote) или hash(git common dir)
+projects  (id, key UNIQUE, root, remote, name)          -- key = hash(git remote) or hash(git common dir)
 sessions  (id TEXT PK, runtime, native_id, project_id, cwd, model, started_at, ended_at)
-events    (id, session_id, turn, kind, tool, input, output, exit_code, ts)   -- сырье, TTL 30 дней
+events    (id, session_id, turn, kind, tool, input, output, exit_code, ts)   -- raw data, TTL 30 days
 memories  (id, project_id NULL, session_id, turn, type, title, body, facts JSON,
            files JSON, hash UNIQUE, created_at, last_used_at, use_count, inject_count,
            superseded_by, origin, origin_id)
-memory_files (memory_id, path)                           -- индекс для file-recall
+memory_files (memory_id, path)                           -- index for file recall
 memories_fts (title, body, facts, stems)                 -- FTS5, external content
 vectors   (memory_id PK, model, dim, scale REAL, q BLOB) -- int8
 summaries (session_id PK, request, done, learned, next_steps)
-injections(session_id, memory_id, trigger, ts, used)     -- для обратной связи и дедупа
+injections(session_id, memory_id, trigger, ts, used)     -- for feedback and dedup
 work_items(id, project_id, list, fields JSON, status, updated_at)
 ```
 
-`project_id NULL` - глобальная память: предпочтения пользователя, правила работы. Она видна во всех проектах.
+`project_id NULL` is global memory: user preferences, working rules. It is visible in every project.
 
-Проект определяется по `git rev-parse --git-common-dir`. Все worktree одного репозитория попадают в один проект, а ветка пишется в метаданные события. Под правило "каждая задача в своем worktree" это критично: сейчас каждый worktree начинает память с нуля.
+The project is resolved with `git rev-parse --git-common-dir`. All worktrees of one repository land in one project, and the branch goes into the event metadata. For a one-worktree-per-task workflow this is critical: in claude-mem every worktree starts its memory from scratch.
 
-### Почему без Chroma
+### Why no Chroma
 
-108 тыс. записей × 1 вектор × 384 измерения в int8 - это 41 МБ. Полный перебор с косинусом на одном ядре укладывается в 10-20 мс, HNSW на таком объеме не окупает себя. Векторы лежат BLOB-ом в той же SQLite, при старте демона читаются в плоский массив. Перестраивать индекс после падения не нужно, потому что индекса нет.
+108k records × 1 vector × 384 dimensions in int8 is 41 MB. A brute-force cosine scan on one core fits in 10-20 ms; HNSW doesn't pay for itself at this size. Vectors are stored as a BLOB in the same SQLite file and read into a flat array when the daemon starts. There's no index to rebuild after a crash, because there is no index.
 
-Один вектор на запись (title + body), а не 10-26. Это само по себе снимает нагрузку в 15-20 раз.
+One vector per record (title + body), not 10-26. That alone cuts the load 15-20 times.
 
-Эмбеддер - интерфейс с тремя реализациями:
+The embedder is an interface with three implementations:
 
-- `none` - по умолчанию. Только FTS5, ноль CPU. На коротких технических заметках BM25 со стеммингом работает хорошо.
-- `openai` - любой OpenAI-совместимый `/v1/embeddings`: Ollama, LM Studio, vLLM, OpenAI, Voyage через прокси.
-- `local` - встроенная модель через ONNX. Только если сборка с cgo, отдельный build tag.
+- `none` - the default. FTS5 only, zero CPU. On short technical notes BM25 with stemming works well.
+- `openai` - any OpenAI-compatible `/v1/embeddings`: Ollama, LM Studio, vLLM, OpenAI, Voyage through a proxy.
+- `local` - a built-in model via ONNX. Only in a cgo build, behind a separate build tag.
 
-Для смешанного русско-английского текста по умолчанию предлагается `bge-m3` или `multilingual-e5-small` через Ollama. MiniLM не годится.
+For mixed Russian and English text the suggested default is `bge-m3` or `multilingual-e5-small` through Ollama. MiniLM won't do.
 
-Эмбеддинг идет фоном: одна горутина, `nice 19`, батчи по 32, пауза, пока идут хуки. У вектора записана модель. Смена модели - фоновое переэмбеддивание с лимитом, старые векторы работают до замены.
+Embedding runs in the background: one goroutine, `nice 19`, batches of 32, paused while hooks are running. Each vector records its model. Changing the model triggers background re-embedding with a rate limit, and old vectors keep working until they are replaced.
 
-### Русский язык в FTS5
+### Russian in FTS5
 
-Токенайзер `unicode61` + отдельная колонка `stems`, куда пишутся основы слов через snowball (`github.com/kljensen/snowball`, русский и английский). Запрос стеммится так же. "Запечатан" находит "запечатанный", "Vault" находит "vault".
+The `unicode61` tokenizer plus a separate `stems` column that holds word stems from snowball (`github.com/kljensen/snowball`, Russian and English). The query is stemmed the same way. "Запечатан" ("sealed") finds "запечатанный", and "Vault" finds "vault".
 
-### Скоринг
+### Scoring
 
 ```text
 score = RRF(bm25_rank, vec_rank)
-      × type_weight          -- decision/gotcha/preference выше discovery
-      × recency(type)        -- discovery: полураспад 30 дней; decision/preference: без затухания
+      × type_weight          -- decision/gotcha/preference rank above discovery
+      × recency(type)        -- discovery: 30-day half-life; decision/preference: no decay
       × (1 + ln(1 + use_count))
-      × penalty(inject_count - use_count)   -- часто показывали и ни разу не пригодилось
+      × penalty(inject_count - use_count)   -- shown often and never useful
 ```
 
-Записи с `superseded_by` в выдачу не попадают.
+Records with `superseded_by` set never appear in results.
 
-## Observer: сжатие
+## Observer: compression
 
-**Батч на ход, а не на вызов инструмента.** События копятся по сессии и сбрасываются в LLM по одному из триггеров: конец хода (Stop), 40 событий, 30 тыс. токенов сырья или 60 секунд тишины. На вход модель получает промпт пользователя, отфильтрованные tool call и финальный ответ ассистента. Она видит намерение, а не поток `Read`. Число LLM-вызовов падает в 5-10 раз.
+**One batch per turn, not per tool call.** Events accumulate per session and are flushed to the LLM on one of several triggers: end of turn (Stop), 40 events, 30k tokens of raw input, or 60 seconds of silence. The model gets the user's prompt, the filtered tool calls and the assistant's final answer. It sees the intent, not a stream of `Read` calls. The number of LLM calls drops 5-10 times.
 
-**Префильтр без LLM:**
+**Prefilter without an LLM:**
 
-- выкинуть шум: `ls`, `git status`, `TodoWrite`, повторные `Read` неизмененного файла (по хешу);
-- обрезать вывод: голова + хвост, лимит на событие;
-- редакция секретов регулярками (токены, ключи, `Authorization:`) и теги `<private>`;
-- факты, которые видны и так (какие файлы тронуты, какие команды упали с каким кодом), пишутся в `events` напрямую, без модели.
+- drop noise: `ls`, `git status`, `TodoWrite`, repeated `Read` of an unchanged file (by hash);
+- trim output: head + tail, with a per-event limit;
+- redact secrets with regexes (tokens, keys, `Authorization:`) and `<private>` tags;
+- facts that are visible anyway (which files were touched, which commands failed and with what code) go straight into `events`, with no model involved.
 
-**Ответ - JSON по схеме** (structured output или tool calling, у кого что есть). Закрытый enum типов:
+**The response is JSON against a schema** (structured output or tool calling, whichever the provider has). A closed enum of types:
 
 `decision`, `bugfix`, `gotcha`, `change`, `discovery`, `preference`, `todo`.
 
-Неизвестный тип превращается в `discovery`. Заголовок до 80 символов, тело до 600, факты списком. Язык вывода - одна настройка, а не 28 файлов режимов.
+An unknown type becomes `discovery`. Title up to 80 characters, body up to 600, facts as a list. The output language is a single setting, not 28 mode files.
 
-**Обновление вместо накопления.** К батчу прикладываются 5 ближайших существующих записей по проекту и файлам. Модель может вернуть `supersedes: [ids]` или `update: {id, body}`. Устаревшее помечается и уходит из выдачи. Через год в базе лежат актуальные знания, а не 108 тыс. слоев истории.
+**Update instead of accumulate.** Each batch comes with the 5 closest existing records by project and files. The model can return `supersedes: [ids]` or `update: {id, body}`. Outdated records are marked and drop out of results. A year from now the database holds current knowledge, not 108k layers of history.
 
-**Без состояния.** Каждый батч - независимый вызов. Нет долгой SDK-сессии, нет `memorySessionId`, нет рестарт-лупов генератора.
+**Stateless.** Every batch is an independent call. No long SDK session, no `memorySessionId`, no generator restart loops.
 
-**Summary сессии** пишется на SessionEnd. Если сессию убили без SessionEnd, summary догенерируется лениво при следующем старте в том же проекте.
+**The session summary** is written on SessionEnd. If a session was killed without SessionEnd, the summary is generated lazily on the next start in the same project.
 
-### Провайдеры
+### Providers
 
-Два протокола закрывают почти весь рынок:
+Two protocols cover almost the whole market:
 
 - **OpenAI-compatible chat completions** - OpenAI, OpenRouter, Ollama, vLLM, LM Studio, DeepSeek, Gemini (OpenAI endpoint), Kimi, z.ai;
 - **Anthropic Messages**.
 
-Третий вариант - **`exec`**: любой CLI с промптом на stdin и JSON на stdout (`claude -p --output-format json`, `codex exec`, `gemini -p`). Так работает подписка без API-ключа, как сейчас через OAuth Claude Code. Процесс запускается на батч и завершается.
+The third option is **`exec`**: any CLI that takes a prompt on stdin and prints JSON on stdout (`claude -p --output-format json`, `codex exec`, `gemini -p`). This is how a subscription works without an API key, the same way claude-mem uses Claude Code's OAuth today. The process starts for one batch and exits.
 
-Конфиг - список провайдеров с приоритетом и фолбэком при 429/5xx. Ротация ключей - тот же список.
+The config is a list of providers with priorities and fallback on 429/5xx. Key rotation uses the same list.
 
-## Recall: когда память срабатывает
+## Recall: when memory fires
 
-Главное отличие от claude-mem. Поиск локальный, поэтому его можно звать на каждом событии, а не раз за сессию.
+This is the main difference from claude-mem. Search is local, so it can run on every event instead of once per session.
 
-| Триггер | Что ищем | Бюджет |
+| Trigger | What we search | Budget |
 |---|---|---|
-| SessionStart (startup) | открытые `work_items`, summary прошлой сессии проекта, топ durable-записей (decision, gotcha, preference) | 600 токенов |
-| SessionStart (compact/resume) | рабочее состояние текущей сессии: что делали, что решили, что осталось | 800 токенов |
-| UserPromptSubmit | гибридный поиск по тексту промпта в проекте + глобальная память | 3-5 записей, только выше порога |
-| PreToolUse `Read`/`Edit`/`Write` | записи с этим путем в `memory_files`, особенно gotcha и bugfix | 1-3 записи, раз на файл за сессию |
-| PostToolUseFailure, Bash с кодом != 0 | текст ошибки против bugfix/gotcha | 1-2 записи: "уже было, #4821, чинили так-то" |
-| SubagentStart (где есть) | поиск по заданию субагента | 3 записи |
+| SessionStart (startup) | open `work_items`, the project's previous session summary, top durable records (decision, gotcha, preference) | 600 tokens |
+| SessionStart (compact/resume) | working state of the current session: what was done, what was decided, what is left | 800 tokens |
+| UserPromptSubmit | hybrid search on the prompt text within the project + global memory | 3-5 records, only above the threshold |
+| PreToolUse `Read`/`Edit`/`Write` | records with this path in `memory_files`, gotcha and bugfix first | 1-3 records, once per file per session |
+| PostToolUseFailure, Bash with exit code != 0 | the error text against bugfix/gotcha | 1-2 records: "seen before, #4821, fixed like this" |
+| SubagentStart (where available) | search on the subagent's task | 3 records |
 
-Правила для всех триггеров:
+Rules for every trigger:
 
-- **Порог.** Ничего релевантного нет - ничего не внедряем. Пустая вставка лучше шума.
-- **Дедуп по сессии.** Запись, показанная один раз, повторно не показывается (таблица `injections`).
-- **Общий бюджет на сессию.** После, скажем, 6 тыс. токенов вставок порог растет.
-- **Формат индекса, как в claude-mem**, - он удачный: `#4821 gotcha infra: Vault запечатан - скрипты молча берут файл (~60t)`. Детали агент берет через MCP `memory_get`.
+- **Threshold.** Nothing relevant means nothing gets injected. An empty injection beats noise.
+- **Per-session dedup.** A record shown once is not shown again (the `injections` table).
+- **Total budget per session.** After, say, 6k tokens of injections the threshold goes up.
+- **Index format as in claude-mem**, because that part works well: `#4821 gotcha infra: Vault sealed - scripts silently fall back to the file (~60t)`. The agent fetches details through MCP `memory_get`.
 
-**Обратная связь.** Запись считается пригодившейся, если после вставки агент вызвал `memory_get` по ее id, сослался на `#id` в ответе или правил файлы из ее `files`. Это растит `use_count`. Много показов при нуле пользы - штраф в скоринге. Сейчас у claude-mem это поле нулевое везде.
+**Feedback.** A record counts as useful if, after the injection, the agent called `memory_get` on its id, referenced `#id` in a reply, or edited files from its `files`. That increments `use_count`. Many impressions with zero use means a scoring penalty. In claude-mem this field is zero everywhere.
 
-Целевая задержка recall-хука - p99 < 80 мс от старта процесса до выхода, из них поиск < 20 мс.
+Target latency for the recall hook is p99 < 80 ms from process start to exit, of which search is < 20 ms.
 
-### MCP-инструменты
+### MCP tools
 
-Мало и без пересечений:
+Few, and with no overlap:
 
-- `memory_search(query, project?, type?, limit?)` - индекс;
-- `memory_get(ids)` - полные записи;
-- `memory_timeline(id, window?)` - соседние записи по времени;
-- `memory_save(text, type?, global?)` - ручная заметка;
-- `work_state(list, fields)` - списки задач и состояние, совместимо по смыслу с `work_state_write`.
+- `memory_search(query, project?, type?, limit?)` - the index;
+- `memory_get(ids)` - full records;
+- `memory_timeline(id, window?)` - neighboring records in time;
+- `memory_save(text, type?, global?)` - a manual note;
+- `work_state(list, fields)` - task lists and state, compatible in meaning with `work_state_write`.
 
-## Runtime-адаптеры
+## Runtime adapters
 
-Ядро принимает одно каноническое событие:
+The core accepts one canonical event:
 
 ```json
 {"runtime":"claude-code","session":"…","cwd":"…","event":"tool_post",
  "turn":7,"tool":{"name":"Bash","input":{},"output":"…","exit":1},"text":null}
 ```
 
-События: `session_start`, `prompt`, `tool_pre`, `tool_post`, `tool_fail`, `turn_end`, `compact`, `subagent_start`, `session_end`.
+Events: `session_start`, `prompt`, `tool_pre`, `tool_post`, `tool_fail`, `turn_end`, `compact`, `subagent_start`, `session_end`.
 
-Адаптер делает две вещи: разбирает stdin конкретного runtime в это событие и рендерит ответ (вставку контекста) в формат этого runtime. Каждый адаптер - один Go-файл и набор фикстур для тестов.
+An adapter does two things: it parses a specific runtime's stdin into this event, and it renders the response (the injected context) in that runtime's format. Each adapter is one Go file plus a set of test fixtures.
 
-| Runtime | Захват | Канал вставки |
+| Runtime | Capture | Injection channel |
 |---|---|---|
-| Claude Code | hooks (полный набор) | `hookSpecificOutput.additionalContext` |
-| Codex CLI | hooks `session_start`, `pre_tool_use`, `post_tool_use` (уже стоят у claude-mem в `~/.codex/config.toml`) | вывод хука; проверить поля |
-| Gemini CLI, Cursor, OpenCode | их hooks/plugin API | по API каждого |
-| Любой другой | `amem watch`: хвост JSONL-транскриптов (`~/.claude/projects`, `~/.codex/sessions` и т.п.) | только MCP и `AGENTS.md`-блок |
+| Claude Code | hooks (full set) | `hookSpecificOutput.additionalContext` |
+| Codex CLI | hooks `session_start`, `pre_tool_use`, `post_tool_use` (claude-mem already registers them in `~/.codex/config.toml`) | hook output; fields to be verified |
+| Gemini CLI, Cursor, OpenCode | their hooks/plugin API | per each API |
+| Anything else | `amem watch`: tailing JSONL transcripts (`~/.claude/projects`, `~/.codex/sessions` and so on) | MCP and an `AGENTS.md` block only |
 
-`amem install <runtime>` прописывает хуки и MCP в конфиг конкретного runtime и умеет `--uninstall`. Без магии с nvm в `PATH`: бинарь лежит в `~/.local/bin`.
+`amem install <runtime>` writes the hooks and MCP into that runtime's config and supports `--uninstall`. No nvm tricks in `PATH`: the binary lives in `~/.local/bin`.
 
-## Перенос из claude-mem
+## Migrating from claude-mem
 
 ```bash
 amem import claude-mem --db ~/.claude-mem/claude-mem.db --dry-run
 amem import claude-mem --db ~/.claude-mem/claude-mem.db
 ```
 
-**Чтение.** Исходная база не открывается на запись и не блокируется. Импорт делает снапшот через SQLite backup API во временный файл и читает его. Воркер claude-mem может работать параллельно.
+**Reading.** The source database is never opened for writing and never locked. The import takes a snapshot into a temporary file through the SQLite backup API and reads that. The claude-mem worker can keep running.
 
-**Маппинг:**
+**Mapping:**
 
-| claude-mem | amem | Заметки |
+| claude-mem | amem | Notes |
 |---|---|---|
 | `sdk_sessions` | `sessions` | id = `platform_source:content_session_id` |
-| `observations` | `memories` | связь через `memory_session_id -> content_session_id`; 15 757 сирот получают синтетическую сессию по проекту и дню |
-| `observations.type` (100+) | enum из 7 | таблица нормализации; исходный тип в `meta.orig_type` |
-| `facts`, `concepts`, `files_*` | `facts`, `memory_files` | JSON-массивы, пути нормализуются к корню проекта |
+| `observations` | `memories` | linked through `memory_session_id -> content_session_id`; the 15 757 orphans get a synthetic session per project and day |
+| `observations.type` (100+) | enum of 7 | normalization table; the original type goes to `meta.orig_type` |
+| `facts`, `concepts`, `files_*` | `facts`, `memory_files` | JSON arrays, paths normalized to the project root |
 | `observation_files` | `memory_files` | |
 | `session_summaries` | `summaries` | |
 | `user_prompts` | `events(kind=prompt)` | |
-| `tool_uses` (164 тыс.) | `events` | только с `--with-raw`, по умолчанию последние 30 дней |
-| `work_state_entries` | `work_items` | последнее значение ключа побеждает, как в оригинале |
-| `project` (basename) | `projects` | пересчет по `cwd` из сессий через git-корень; worktree схлопываются в родительский репозиторий |
-| Chroma | - | не переносится; векторы MiniLM несовместимы с новой моделью и плохо работают на русском |
+| `tool_uses` (164k) | `events` | only with `--raw 30d` (a window) or `--raw all`; skipped by default |
+| `work_state_entries` | `work_items` | last value per key wins, as in the original |
+| `project` (basename) | `projects` | recomputed from the sessions' `cwd` via the git root; worktrees collapse into the parent repository |
+| Chroma | - | not migrated; MiniLM vectors are incompatible with the new model and do poorly on Russian |
 
-**Идемпотентность.** Уникальный ключ `(origin='claude-mem', origin_id)`. Повторный запуск дописывает только новое, поэтому импорт можно гонять, пока обе системы живут рядом. Дедуп по `hash` нормализованного текста.
+**Idempotency.** Unique key `(origin='claude-mem', origin_id)`. A repeated run adds only what is new, so the import can be rerun while both systems live side by side. Dedup by `hash` of the normalized text.
 
-**Отчет** после прогона: сколько записей перенесено по типам и проектам, сколько сирот, какие проекты слились, сколько дублей отброшено.
+**Report** after a run: how many records were migrated by type and project, how many orphans, which projects were merged, how many duplicates were dropped.
 
-**Переключение:**
+**Switchover:**
 
-1. `amem import` + `amem install claude-code` в shadow-режиме: amem захватывает, но не внедряет. Неделю сравниваем, что бы он показал, с тем, что показывает claude-mem.
-2. Включаем вставки amem, выключаем плагин claude-mem. Его база остается нетронутой как резерв.
-3. Финальный `amem import` для догона, потом удаление плагина. Данные `~/.claude-mem/` - в `trash`, не `rm`.
+1. `amem import` + `amem install claude-code` in shadow mode: amem captures but does not inject. For a week we compare what it would show with what claude-mem shows.
+2. Turn amem injections on, turn the claude-mem plugin off. Its database stays untouched as a fallback.
+3. A final `amem import` to catch up, then remove the plugin. Move the `~/.claude-mem/` data to `trash`, don't `rm` it.
 
-Эмбеддинги для 108 тыс. записей считаются фоном после импорта: сначала последние 90 дней, потом остальное.
+Embeddings for 108k records are computed in the background after the import: the last 90 days first, then the rest.
 
-## Что не переносим
+## What we don't carry over
 
-Viewer UI в v1 - нет, есть `amem search` и `amem show`. Простую read-only страницу можно добавить потом. Cloud sync, teambrain, knowledge corpora, work-view с прогонами codex, deliverables bucket, телеметрия PostHog, smart-file-read на tree-sitter и 28 файлов режимов тоже не переносим.
+No viewer UI in v1; there are `amem search` and `amem show`. A simple read-only page can be added later. Cloud sync, teambrain, knowledge corpora, work-view with codex runs, the deliverables bucket, PostHog telemetry, tree-sitter smart-file-read and the 28 mode files are not carried over either.
 
-Каждая такая вещь - отдельный запрос с обоснованием, а не "было в оригинале".
+Each of these would be a separate request with a justification, not "the original had it".
 
-## Бюджеты
+## Budgets
 
-| Метрика | Цель |
+| Metric | Target |
 |---|---|
-| Хук захвата, p99 | < 20 мс |
-| Хук recall, p99 | < 80 мс |
-| Поиск по 110 тыс. записей | < 20 мс |
-| RSS демона на 110 тыс. записей с векторами | < 150 МБ |
-| CPU при простое | 0 |
-| CPU при работе агентов (без локального эмбеддера) | < 5% одного ядра |
-| Размер базы после импорта (без `--with-raw`) | < 400 МБ |
-| Процессов на сессию runtime | 0 постоянных |
+| Capture hook, p99 | < 20 ms |
+| Recall hook, p99 | < 80 ms |
+| Search over 110k records | < 20 ms |
+| Daemon RSS at 110k records with vectors | < 150 MB |
+| CPU when idle | 0 |
+| CPU while agents work (no local embedder) | < 5% of one core |
+| Database size after import (without `--raw`) | < 400 MB |
+| Processes per runtime session | 0 persistent |
 
-Бюджеты проверяются бенчмарком в CI на синтетической базе того же размера.
+Budgets are checked by a CI benchmark on a synthetic database of the same size.
 
-## Стек
+## Stack
 
-- Go 1.25+, один модуль, без cgo в основной сборке.
-- SQLite: `modernc.org/sqlite` или `github.com/ncruces/go-sqlite3`. Оба без cgo и с FTS5; выбор - бенчмарком на импортированной базе.
+- Go 1.26+, one module, no cgo in the main build.
+- SQLite: `modernc.org/sqlite` or `github.com/ncruces/go-sqlite3`. Both are cgo-free and have FTS5; the choice is made by benchmark on the imported database.
 - MCP: `github.com/modelcontextprotocol/go-sdk`.
-- Стемминг: `github.com/kljensen/snowball`.
-- Векторы: свой плоский int8-скан, без зависимостей.
-- HTTP к LLM: стандартный `net/http`, без провайдерских SDK.
+- Stemming: `github.com/kljensen/snowball`.
+- Vectors: a custom flat int8 scan, no dependencies.
+- HTTP to LLMs: standard `net/http`, no provider SDKs.
 
 ```text
-cmd/amem/            main, подкоманды
-internal/event/      каноническое событие
-internal/adapter/    claudecode, codex, gemini, cursor, opencode, transcript
-internal/store/      схема, миграции, запросы
-internal/recall/     FTS, векторы, скоринг, бюджеты
-internal/observer/   батчинг, префильтр, промпт, JSON schema
+cmd/amem/            main, subcommands
+internal/event/      canonical event
+internal/adapter/    claudecode, codex, gemini, cursor, opencode, kimi, transcript
+internal/store/      schema, migrations, queries
+internal/recall/     FTS, vectors, scoring, budgets
+internal/observer/   batching, prefilter, prompt, JSON schema
 internal/provider/   openai, anthropic, exec
 internal/embed/      none, openai, local (build tag)
-internal/daemon/     сокет, spool, жизненный цикл
-internal/mcp/        инструменты
+internal/daemon/     socket, spool, lifecycle
+internal/mcpserver/  tools
 internal/importer/   claudemem
 ```
 
-## Этапы
+## Stages
 
-1. **Ядро захвата.** Демон, сокет, spool, адаптер Claude Code, `events`, `sessions`, `projects`. Критерий: хуки не тормозят сессию, ничего не теряется при `kill -9` демона.
-2. **Импорт.** `amem import claude-mem` с отчетом. Критерий: 107 906 записей на месте, проекты схлопнуты.
-3. **Recall на FTS5.** Все триггеры, бюджеты, дедуп, MCP-инструменты. Shadow-режим.
-4. **Observer.** Батчи, JSON schema, supersede, три провайдера.
-5. **Векторы.** Эмбеддер через Ollama, гибридный скоринг, фоновый backfill.
-6. **Другие runtime.** Codex, затем остальные по спросу, `amem watch`.
-7. **Переключение** по шагам выше.
+1. **Capture core.** Daemon, socket, spool, Claude Code adapter, `events`, `sessions`, `projects`. Done when: hooks don't slow the session down, and nothing is lost on `kill -9` of the daemon.
+2. **Import.** `amem import claude-mem` with a report. Done when: all 107 906 records are in place and projects are collapsed.
+3. **Recall on FTS5.** All triggers, budgets, dedup, MCP tools. Shadow mode.
+4. **Observer.** Batches, JSON schema, supersede, three providers.
+5. **Vectors.** Embedder through Ollama, hybrid scoring, background backfill.
+6. **Other runtimes.** Codex, then the rest on demand, `amem watch`.
+7. **Switchover** following the steps above.
 
-После этапа 3 систему уже можно включать: память из claude-mem перенесена, recall работает без векторов и без LLM.
+After stage 3 the system can already be turned on: claude-mem memory is migrated, and recall works without vectors and without an LLM.
 
-## Решения по итогам реализации
+## Decisions after implementation
 
-Открытые вопросы закрыты так:
+The open questions were settled like this:
 
-- **Эмбеддер и сжатие выбирает пользователь** в `amem init`. Эмбеддер: `none`, Ollama или любой OpenAI-совместимый `/v1/embeddings`. Observer: подписка через CLI (`claude`, `codex`, `gemini`) или API-ключ (Anthropic, OpenAI-совместимый). Ключи хранятся ссылками `env:`, `cmd:`, `file:`.
-- **Глобальная память**: только `preference` с `global=true` от observer и явное `memory_save --global`.
-- **Синхронизации между машинами в v1 нет.**
+- **The user picks the embedder and the compressor** in `amem init`. Embedder: `none`, Ollama, or any OpenAI-compatible `/v1/embeddings`. Observer: a subscription CLI (`claude`, `codex`, `gemini`) or an API key (Anthropic, OpenAI-compatible). Keys are stored as `env:`, `cmd:`, `file:` references.
+- **Global memory**: only `preference` with `global=true` from the observer, and explicit `memory_save --global`.
+- **No sync between machines in v1.**
 
-Что изменилось относительно дизайна выше:
+What changed compared to the design above:
 
-- Сокет лежит в data dir, а не в `$XDG_RUNTIME_DIR`: вся установка переносится одной переменной `AMEM_HOME`.
-- Импорт читает живую базу claude-mem в read-only без `VACUUM INTO`: копия на 750 МБ не нужна, воркеру это не мешает.
-- Концепт `gotcha` у claude-mem не превращается в тип `gotcha`: dry-run показал, что так бы стало 28 тыс. gotcha из 108 тыс. записей.
-- Векторы не держатся в RAM целиком. В памяти только знаковые биты (dim/8 байт на запись), отбор по Хэммингу, затем точный int8-пересчет топ-256 из SQLite. 110 тыс. записей: 1.5-2.8 мс, 5-14 МБ.
-- DF основ для IDF лежит в таблице `stem_df`: `fts5vocab` на большом индексе давал до 40% времени поиска.
-- MCP для Claude Code регистрируется через `claude mcp add`: `~/.claude.json` - живой файл состояния, его нельзя переписывать со стороны.
-- Хук спрашивает адаптер, примет ли runtime контекст на этом событии. Если нет (Kimi на SessionStart, Cursor на `beforeSubmitPrompt`), recall не запускается и запись не считается показанной.
-- Версия демона включает git-ревизию: новый бинарь сам заменяет запущенный демон.
-- Добавлен Kimi Code: `[[hooks]]` в `~/.kimi-code/config.toml`, контекст через stdout.
+- The socket lives in the data dir, not in `$XDG_RUNTIME_DIR`, so the whole installation moves with a single `AMEM_HOME` variable.
+- The import reads the live claude-mem database read-only, without `VACUUM INTO`: a 750 MB copy isn't needed, and it doesn't get in the worker's way.
+- claude-mem's `gotcha` concept is not turned into the `gotcha` type: a dry run showed that this would produce 28k gotchas out of 108k records.
+- Vectors are not kept fully in RAM. Memory holds only the sign bits (dim/8 bytes per record); candidates are picked by Hamming distance, then the top 256 are rescored exactly in int8 from SQLite. 110k records: 1.5-2.8 ms, 5-14 MB.
+- Stem DF for IDF lives in the `stem_df` table: `fts5vocab` on a large index accounted for up to 40% of search time.
+- MCP for Claude Code is registered through `claude mcp add`: `~/.claude.json` is a live state file and must not be rewritten from outside.
+- The hook asks the adapter whether the runtime accepts context on this event. If not (Kimi on SessionStart, Cursor on `beforeSubmitPrompt`), recall doesn't run and the record isn't counted as shown.
+- The daemon version includes the git revision: a new binary replaces the running daemon by itself.
+- Kimi Code was added: `[[hooks]]` in `~/.kimi-code/config.toml`, context through stdout.
 
-Замеры на импортированной базе (108 тыс. записей): захват p99 13 мс, recall-хук p99 40 мс, поиск p99 18 мс, импорт 2.5 минуты.
+Measurements on the imported database (108k records): capture p99 13 ms, recall hook p99 40 ms, search p99 18 ms, import 2.5 minutes.

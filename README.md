@@ -2,115 +2,115 @@
 
 [![ci](https://github.com/tazhate/agent-mem/actions/workflows/ci.yml/badge.svg)](https://github.com/tazhate/agent-mem/actions/workflows/ci.yml)
 
-Память между сессиями для AI-агентов: Claude Code, Codex, Gemini CLI, Cursor, OpenCode. Один статический Go-бинарь, одна SQLite, без Node, Python и векторной базы. Замена claude-mem с переносом данных.
+Cross-session memory for AI agents: Claude Code, Codex, Gemini CLI, Cursor, OpenCode, Kimi Code. One static Go binary, one SQLite file, no Node, no Python, no vector database. A drop-in replacement for claude-mem that brings your data along.
 
-Что делает. Хуки пишут события сессии в локальный демон. Observer раз за ход сжимает их в короткие записи через выбранную модель. Recall подсовывает агенту нужное в нужный момент: на старте сессии, на промпт, перед чтением файла с историей, на упавшую команду, после compact. Поиск локальный, p99 18 мс на 108 тыс. записей, так что срабатывает он часто и ничего не ждет.
+What it does. Hooks send session events to a local daemon. Once per turn, the observer compresses them into short memories with a model of your choice. Recall hands the agent what it needs at the moment it needs it: at session start, on a prompt, before reading a file that has history, on a failed command, after compact. Search is local, p99 18 ms on 108k memories, so it can run often and never makes the agent wait.
 
-Концепция и причины решений описаны в [DESIGN.md](DESIGN.md).
+The concept and the reasoning behind the design are in [DESIGN.md](DESIGN.md).
 
-## Установка
+## Installation
 
-Готовый бинарь для Linux и macOS (amd64, arm64) лежит в [релизах](https://github.com/tazhate/agent-mem/releases). Или из исходников, нужен Go 1.26:
+Prebuilt binaries for Linux and macOS (amd64, arm64) are on the [releases](https://github.com/tazhate/agent-mem/releases) page. Or build from source, which needs Go 1.26:
 
 ```bash
 go install github.com/tazhate/agent-mem/cmd/amem@latest
 amem init
 ```
 
-Windows не поддерживается: демон работает через unix-сокет и flock.
+Windows is not supported: the daemon relies on a unix socket and flock.
 
-`amem init` спрашивает четыре вещи:
+`amem init` asks four questions:
 
-- **Observer** - чем писать записи. Подписка через CLI (`claude`, `codex`, `gemini`: свой логин, общие лимиты) или API-ключ (`anthropic`, `openai` - это любой OpenAI-совместимый сервер: OpenRouter, Ollama, vLLM, DeepSeek). Ключ хранится ссылкой: `env:NAME`, `cmd:vault kv get ...`, `file:path`.
-- **Embedder** - `none` (только полнотекстовый поиск со стеммингом ru/en), Ollama или любой `/v1/embeddings`. Для смеси русского и английского подходит `bge-m3`.
-- **Язык** записей.
-- **Recall mode**: `on`, `shadow` (считать, что вставить, но не вставлять) или `off`.
+- **Observer** - what writes the memories. A subscription CLI (`claude`, `codex`, `gemini`: your own login, shared limits) or an API key (`anthropic`, or `openai`, which means any OpenAI-compatible server: OpenRouter, Ollama, vLLM, DeepSeek). The key is stored as a reference: `env:NAME`, `cmd:vault kv get ...`, `file:path`.
+- **Embedder** - `none` (full-text search only, with ru/en stemming), Ollama, or any `/v1/embeddings` endpoint. `bge-m3` works well for mixed Russian and English text.
+- **Language** of the memories.
+- **Recall mode**: `on`, `shadow` (compute what would be injected, but don't inject it) or `off`.
 
-Без вопросов то же самое задается флагами:
+The same setup works without prompts through flags:
 
 ```bash
 amem init --yes --observer claude --embed none --language Russian --recall shadow --runtimes claude-code,codex
 ```
 
-Хуки ставятся отдельно и снимаются обратно:
+Hooks are installed separately and can be removed again:
 
 ```bash
-amem install claude-code --dry-run   # показать diff
+amem install claude-code --dry-run   # show the diff
 amem install claude-code
 amem install claude-code --uninstall
-amem install detected                # все найденные runtime
+amem install detected                # every runtime found
 ```
 
-Установщик дописывает только свои записи, чужие хуки и порядок ключей не трогает. Рядом с каждым измененным файлом остается `*.bak-amem-<время>`. Codex после установки один раз попросит подтвердить доверие к новым хукам.
+The installer adds only its own entries and leaves other hooks and key order alone. Every file it changes gets a `*.bak-amem-<timestamp>` copy next to it. After installation Codex will ask once to confirm trust in the new hooks.
 
-## Перенос из claude-mem
+## Migrating from claude-mem
 
 ```bash
 amem import claude-mem --dry-run
 amem import claude-mem
 ```
 
-Исходная база открывается только на чтение, воркер claude-mem может работать параллельно. Импорт идемпотентный: повторный запуск добавит только новое, поэтому его можно гонять, пока обе системы живут рядом.
+The source database is opened read-only, so the claude-mem worker can keep running. Import is idempotent: a repeated run adds only what is new, so you can rerun it while both systems live side by side.
 
-При переносе:
+During the migration:
 
-- 100+ самодельных типов claude-mem сводятся к семи: `decision`, `bugfix`, `gotcha`, `change`, `discovery`, `preference`, `todo`. Исходный тип сохраняется в `meta.orig_type`;
-- наблюдения без живой сессии получают синтетическую сессию на день;
-- проекты-worktree (`api/wt-feature`) сливаются с репозиторием;
-- проекты без записанного пути становятся `legacy:<имя>` и сливаются сами, когда стартует сессия в репозитории с таким именем.
+- the 100+ ad hoc claude-mem types are reduced to seven: `decision`, `bugfix`, `gotcha`, `change`, `discovery`, `preference`, `todo`. The original type is kept in `meta.orig_type`;
+- observations without a live session get a synthetic session per day;
+- worktree projects (`api/wt-feature`) are merged into their repository;
+- projects with no recorded path become `legacy:<name>` and merge on their own once a session starts in a repository with that name.
 
-Chroma не переносится. Векторы MiniLM плохо работают на русском, их пересчитает выбранный эмбеддер.
+Chroma is not migrated. MiniLM vectors do poorly on Russian, and the embedder you pick recomputes them.
 
-На базе в 750 МБ импорт занимает около 1.5 минуты.
+On a 750 MB database the import takes about 1.5 minutes.
 
-Порядок переключения:
+Switchover order:
 
-1. `amem init --recall shadow` и `amem install claude-code`. Неделю amem пишет и считает, но ничего не вставляет.
-2. `amem shadow-report` - что он вставил бы.
-3. `recall.mode = "on"` в конфиге, плагин claude-mem выключить.
-4. Финальный `amem import claude-mem` для догона.
+1. `amem init --recall shadow` and `amem install claude-code`. For a week amem writes and computes but injects nothing.
+2. `amem shadow-report` - what it would have injected.
+3. Set `recall.mode = "on"` in the config and disable the claude-mem plugin.
+4. A final `amem import claude-mem` to catch up.
 
-## Команды
+## Commands
 
-| Команда | Зачем |
+| Command | Purpose |
 |---|---|
-| `amem search [--project P\|all] [--type T] запрос` | поиск, как его видит агент |
-| `amem show 123 456` | полные записи |
-| `amem save [--global] [--type T] текст` | ручная заметка; `--global` видна во всех проектах |
-| `amem doctor [--probe]` | демон, хуки, провайдер, эмбеддер, spool |
-| `amem stats` | счетчики базы |
-| `amem watch --preset claude\|codex` | транскрипты для runtime без хуков (или `--subagents-only` для Codex) |
-| `amem bench recall\|hook` | задержки на своей базе |
+| `amem search [--project P\|all] [--type T] query` | search, the way the agent sees it |
+| `amem show 123 456` | full memories |
+| `amem save [--global] [--type T] text` | manual note; `--global` makes it visible in every project |
+| `amem doctor [--probe]` | daemon, hooks, provider, embedder, spool |
+| `amem stats` | database counters |
+| `amem watch --preset claude\|codex` | transcripts for runtimes without hooks (or `--subagents-only` for Codex) |
+| `amem bench recall\|hook` | latency on your own database |
 
-MCP-инструменты для агента: `memory_search`, `memory_get`, `memory_timeline`, `memory_save`, `work_state`. Демон может отдавать их и по streamable HTTP, если в конфиге задан `daemon.http_addr`.
+MCP tools for the agent: `memory_search`, `memory_get`, `memory_timeline`, `memory_save`, `work_state`. The daemon can also serve them over streamable HTTP if `daemon.http_addr` is set in the config.
 
-## Файлы
+## Files
 
-| Путь | Что |
+| Path | Contents |
 |---|---|
-| `~/.config/amem/config.toml` | конфиг, права 0600 |
-| `~/.local/share/amem/amem.db` | данные, FTS5-индекс и векторы |
-| `~/.local/share/amem/amemd.sock` | сокет демона |
-| `~/.local/share/amem/spool.jsonl` | события, пока демон недоступен |
-| `~/.local/share/amem/amemd.log` | лог демона |
+| `~/.config/amem/config.toml` | config, mode 0600 |
+| `~/.local/share/amem/amem.db` | data, FTS5 index and vectors |
+| `~/.local/share/amem/amemd.sock` | daemon socket |
+| `~/.local/share/amem/spool.jsonl` | events while the daemon is unavailable |
+| `~/.local/share/amem/amemd.log` | daemon log |
 
-`AMEM_HOME` переносит все в другой каталог: конфиг, базу, сокет. Так удобно гонять тесты рядом с рабочей установкой. `AMEM_DISABLE=1` выключает хуки в текущем окружении; observer сам ставит его своим CLI-процессам, чтобы не было рекурсии.
+`AMEM_HOME` moves everything to another directory: config, database, socket. That makes it easy to run tests next to a working installation. `AMEM_DISABLE=1` turns hooks off in the current environment; the observer sets it for its own CLI processes to avoid recursion.
 
-## Как это устроено
+## How it works
 
 ```text
-runtime hook -> amem hook (2-10 мс) -> unix socket -> amemd -> SQLite (WAL)
-                    |                                   |-- recall: FTS5 + стемминг + векторы, < 20 мс
-                    +-- демона нет: spool + запуск      |-- observer: батч на ход -> LLM -> JSON schema
-                                                        +-- embedder: фоном, пауза, пока идут хуки
+runtime hook -> amem hook (2-10 ms) -> unix socket -> amemd -> SQLite (WAL)
+                    |                                   |-- recall: FTS5 + stemming + vectors, < 20 ms
+                    +-- no daemon: spool + spawn        |-- observer: batch per turn -> LLM -> JSON schema
+                                                        +-- embedder: background, pauses while hooks run
 ```
 
-Хук никогда не ломает сессию агента: любая ошибка дает выход 0 и пустой ответ, а событие уходит в spool. Повторная доставка отсекается по id события. Тест `scripts/durability.sh` проверяет это через `kill -9` демона посреди 200 параллельных хуков.
+A hook never breaks the agent's session: any error gives exit code 0 and an empty response, and the event goes to the spool. Redelivery is filtered out by event id. The `scripts/durability.sh` test checks this by sending `kill -9` to the daemon in the middle of 200 parallel hooks.
 
-## Разработка
+## Development
 
 ```bash
 go test -race ./...
 AMEM_HOME=/tmp/amem-dur ./scripts/durability.sh
-AMEM_QUALITY_DB=/path/amem.db go test ./internal/recall -run Manual -v   # глазами оценить recall
+AMEM_QUALITY_DB=/path/amem.db go test ./internal/recall -run Manual -v   # eyeball recall quality
 ```
