@@ -567,15 +567,16 @@ func (s *Store) Scrub(ctx context.Context, clean func(string) string, dryRun boo
 		}
 	}
 	for _, t := range []struct {
-		table string
-		cols  []string
-		count *int
+		table    string
+		cols     []string
+		nullable bool // empty text becomes NULL (events); NOT NULL columns keep ''
+		count    *int
 	}{
-		{"summaries", []string{"request", "investigated", "learned", "completed", "next_steps", "notes"}, &rep.Summaries},
-		{"events", []string{"input", "output", "error"}, &rep.Events},
-		{"work_entries", []string{"fields"}, &rep.WorkEntries},
+		{"summaries", []string{"request", "investigated", "learned", "completed", "next_steps", "notes"}, false, &rep.Summaries},
+		{"events", []string{"input", "output", "error"}, true, &rep.Events},
+		{"work_entries", []string{"fields"}, false, &rep.WorkEntries},
 	} {
-		n, err := s.scrubTable(ctx, t.table, t.cols, clean, dryRun)
+		n, err := s.scrubTable(ctx, t.table, t.cols, t.nullable, clean, dryRun)
 		if err != nil {
 			return rep, err
 		}
@@ -584,7 +585,7 @@ func (s *Store) Scrub(ctx context.Context, clean func(string) string, dryRun boo
 	return rep, nil
 }
 
-func (s *Store) scrubTable(ctx context.Context, table string, cols []string, clean func(string) string, dryRun bool) (int, error) {
+func (s *Store) scrubTable(ctx context.Context, table string, cols []string, nullable bool, clean func(string) string, dryRun bool) (int, error) {
 	sel := make([]string, len(cols))
 	for i, c := range cols {
 		sel[i] = "coalesce(" + c + ", '')"
@@ -638,7 +639,10 @@ func (s *Store) scrubTable(ctx context.Context, table string, cols []string, cle
 		}
 		set := make([]string, len(cols))
 		for i, c := range cols {
-			set[i] = c + " = nullif(?, '')"
+			set[i] = c + " = ?"
+			if nullable {
+				set[i] = c + " = nullif(?, '')"
+			}
 		}
 		if err := s.Write(ctx, func(tx *sql.Tx) error {
 			for _, u := range batch {

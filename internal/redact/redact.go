@@ -44,35 +44,38 @@ type rule struct {
 	needLetter bool
 	// needDigit rejects values without a digit (CSS class names like sk-spinner-fading-circle).
 	needDigit bool
+	// hints are lowercase substrings one of which must occur for the rule to match at all;
+	// checking them first skips the regexp on almost all text.
+	hints []string
 }
 
 const genericValue = `[A-Za-z0-9_.\-+/=~@#$%^*!?]{8,}`
 
 var specific = []rule{
 	// A key without its END line (e.g. `head id_rsa`) is masked to the end of the text.
-	{name: "private_key", re: regexp.MustCompile(`(?s)-----BEGIN [A-Z ]*PRIVATE KEY(?: BLOCK)?-----.*?(?:-----END [A-Z ]*PRIVATE KEY(?: BLOCK)?-----|\z)`)},
-	{name: "url_password", re: regexp.MustCompile(`(?i)(\b[a-z][a-z0-9+.-]{1,20}://[^/\s:@'"]{1,128}:)([^@\s/'"]{3,256})@`), group: 2},
-	{name: "aws_access_key", re: regexp.MustCompile(`\b(?:AKIA|ASIA)[0-9A-Z]{16}\b`)},
-	{name: "aws_secret_key", re: regexp.MustCompile(`(?i)((?:aws_secret_access_key|secretaccesskey)["']?\s{0,8}[=:]\s{0,8}["']?)([A-Za-z0-9/+=]{40})`), group: 2},
-	{name: "azure_key", re: regexp.MustCompile(`(?i)((?:AccountKey|SharedAccessKey)=)([A-Za-z0-9+/=]{20,})`), group: 2},
-	{name: "github_token", re: regexp.MustCompile(`\bgh[oprsu]_[A-Za-z0-9]{36}\b|\bgithub_pat_[A-Za-z0-9_]{82}\b`)},
-	{name: "gitlab_token", re: regexp.MustCompile(`\bglpat-[A-Za-z0-9_-]{20,}`)},
-	{name: "npm_token", re: regexp.MustCompile(`\bnpm_[A-Za-z0-9]{36}\b`)},
-	{name: "huggingface_token", re: regexp.MustCompile(`\bhf_[A-Za-z0-9]{30,}\b`)},
-	{name: "telegram_bot_token", re: regexp.MustCompile(`\b\d{6,12}:AA[A-Za-z0-9_-]{30,}`)},
-	{name: "anthropic_key", re: regexp.MustCompile(`\bsk-ant-[A-Za-z0-9_-]{20,}`)},
-	{name: "openai_key", re: regexp.MustCompile(`\bsk-(?:proj-|svcacct-|admin-)?[A-Za-z0-9_-]{20,}`), needDigit: true},
-	{name: "slack_token", re: regexp.MustCompile(`\b(?:xox[abeprs]|xapp)-[A-Za-z0-9-]{10,}`)},
-	{name: "jwt", re: regexp.MustCompile(`\beyJ[A-Za-z0-9_-]+\.eyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+`)},
-	{name: "stripe_key", re: regexp.MustCompile(`\b(?:sk|pk|rk)_(?:live|test)_[A-Za-z0-9]{24,}\b`)},
-	{name: "google_api_key", re: regexp.MustCompile(`\bAIza[0-9A-Za-z_-]{35}`)},
-	{name: "vault_token", re: regexp.MustCompile(`\bhv[sbr]\.[A-Za-z0-9_-]{20,}`)},
-	{name: "bearer_token", re: regexp.MustCompile(`(?i)(authorization["']?\s{0,8}:\s{0,8}["']?(?:bearer|basic|token)\s{1,8})(` + genericValue + `)`), group: 2},
+	{name: "private_key", re: regexp.MustCompile(`(?s)-----BEGIN [A-Z ]*PRIVATE KEY(?: BLOCK)?-----.*?(?:-----END [A-Z ]*PRIVATE KEY(?: BLOCK)?-----|\z)`), hints: []string{"private key"}},
+	{name: "url_password", re: regexp.MustCompile(`(?i)(\b[a-z][a-z0-9+.-]{1,20}://[^/\s:@'"]{1,128}:)([^@\s/'"]{3,256})@`), group: 2, hints: []string{"://"}},
+	{name: "aws_access_key", re: regexp.MustCompile(`\b(?:AKIA|ASIA)[0-9A-Z]{16}\b`), hints: []string{"akia", "asia"}},
+	{name: "aws_secret_key", re: regexp.MustCompile(`(?i)((?:aws_secret_access_key|secretaccesskey)["']?\s{0,8}[=:]\s{0,8}["']?)([A-Za-z0-9/+=]{40})`), group: 2, hints: []string{"secretaccesskey", "secret_access_key"}},
+	{name: "azure_key", re: regexp.MustCompile(`(?i)((?:AccountKey|SharedAccessKey)=)([A-Za-z0-9+/=]{20,})`), group: 2, hints: []string{"accountkey", "sharedaccesskey"}},
+	{name: "github_token", re: regexp.MustCompile(`\bgh[oprsu]_[A-Za-z0-9]{36}\b|\bgithub_pat_[A-Za-z0-9_]{82}\b`), hints: []string{"ghp_", "gho_", "ghr_", "ghs_", "ghu_", "github_pat_"}},
+	{name: "gitlab_token", re: regexp.MustCompile(`\bglpat-[A-Za-z0-9_-]{20,}`), hints: []string{"glpat-"}},
+	{name: "npm_token", re: regexp.MustCompile(`\bnpm_[A-Za-z0-9]{36}\b`), hints: []string{"npm_"}},
+	{name: "huggingface_token", re: regexp.MustCompile(`\bhf_[A-Za-z0-9]{30,}\b`), hints: []string{"hf_"}},
+	{name: "telegram_bot_token", re: regexp.MustCompile(`\b\d{6,12}:AA[A-Za-z0-9_-]{30,}`), hints: []string{":aa"}},
+	{name: "anthropic_key", re: regexp.MustCompile(`\bsk-ant-[A-Za-z0-9_-]{20,}`), hints: []string{"sk-ant-"}},
+	{name: "openai_key", re: regexp.MustCompile(`\bsk-(?:proj-|svcacct-|admin-)?[A-Za-z0-9_-]{20,}`), needDigit: true, hints: []string{"sk-"}},
+	{name: "slack_token", re: regexp.MustCompile(`\b(?:xox[abeprs]|xapp)-[A-Za-z0-9-]{10,}`), hints: []string{"xox", "xapp-"}},
+	{name: "jwt", re: regexp.MustCompile(`\beyJ[A-Za-z0-9_-]+\.eyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+`), hints: []string{"eyj"}},
+	{name: "stripe_key", re: regexp.MustCompile(`\b(?:sk|pk|rk)_(?:live|test)_[A-Za-z0-9]{24,}\b`), hints: []string{"_live_", "_test_"}},
+	{name: "google_api_key", re: regexp.MustCompile(`\bAIza[0-9A-Za-z_-]{35}`), hints: []string{"aiza"}},
+	{name: "vault_token", re: regexp.MustCompile(`\bhv[sbr]\.[A-Za-z0-9_-]{20,}`), hints: []string{"hvs.", "hvb.", "hvr."}},
+	{name: "bearer_token", re: regexp.MustCompile(`(?i)(authorization["']?\s{0,8}:\s{0,8}["']?(?:bearer|basic|token)\s{1,8})(` + genericValue + `)`), group: 2, hints: []string{"authorization"}},
 }
 
 var generic = []rule{
-	{name: "secret", re: regexp.MustCompile(`(?i)(\b[\w-]*(?:password|passwd|pwd|secret|token|api[_-]?key|apikey|access[_-]?key|private[_-]?key)["']?\s{0,8}[=:]\s{0,8}["']?)(` + genericValue + `)`), group: 2, needLetter: true},
-	{name: "secret_flag", re: regexp.MustCompile(`(?i)(--(?:token|password|passwd|api-key|apikey|secret)[= ]["']?)(` + genericValue + `)`), group: 2, needLetter: true},
+	{name: "secret", re: regexp.MustCompile(`(?i)(\b[\w-]*(?:password|passwd|pwd|secret|token|api[_-]?key|apikey|access[_-]?key|private[_-]?key)["']?\s{0,8}[=:]\s{0,8}["']?)(` + genericValue + `)`), group: 2, needLetter: true, hints: []string{"password", "passwd", "pwd", "secret", "token", "key"}},
+	{name: "secret_flag", re: regexp.MustCompile(`(?i)(--(?:token|password|passwd|api-key|apikey|secret)[= ]["']?)(` + genericValue + `)`), group: 2, needLetter: true, hints: []string{"--token", "--password", "--passwd", "--api-key", "--apikey", "--secret"}},
 }
 
 type Redactor struct {
@@ -93,13 +96,28 @@ func (r *Redactor) Clean(s string) string {
 		return s
 	}
 	s = StripTags(s)
+	lower := strings.ToLower(s)
 	for _, ru := range r.rules {
-		s = ru.apply(s)
+		if out := ru.apply(s, lower); out != s {
+			s, lower = out, strings.ToLower(out)
+		}
 	}
 	return s
 }
 
-func (ru rule) apply(s string) string {
+func (ru rule) apply(s, lower string) string {
+	if len(ru.hints) > 0 {
+		found := false
+		for _, h := range ru.hints {
+			if strings.Contains(lower, h) {
+				found = true
+				break
+			}
+		}
+		if !found {
+			return s
+		}
+	}
 	idx := ru.re.FindAllStringSubmatchIndex(s, -1)
 	if idx == nil {
 		return s

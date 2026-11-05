@@ -143,9 +143,16 @@ func TestScrub(t *testing.T) {
 		s.InsertEvent(ctx, tx, EventRow{SessionID: "x", Kind: "prompt", Input: "use postgres://u:hunter2pw@h/db", TS: 1})
 		return nil
 	})
-	clean := func(v string) string { return strings.ReplaceAll(v, "hunter2pw", "[REDACTED]") }
+	// A summary whose only content is a secret becomes '' and must not violate NOT NULL.
+	s.InsertSummary(ctx, &Summary{SessionID: "x", ProjectID: pid, Request: "hunter2pw", Completed: "hunter2pw"})
+	clean := func(v string) string {
+		if v == "hunter2pw" {
+			return ""
+		}
+		return strings.ReplaceAll(v, "hunter2pw", "[REDACTED]")
+	}
 	rep, err := s.Scrub(ctx, clean, true)
-	if err != nil || rep.Memories != 1 || rep.Events != 1 {
+	if err != nil || rep.Memories != 1 || rep.Events != 1 || rep.Summaries != 1 {
 		t.Fatalf("dry run: %+v %v", rep, err)
 	}
 	if _, err := s.Scrub(ctx, clean, false); err != nil {
