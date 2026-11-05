@@ -1,6 +1,7 @@
 package store
 
 import (
+	"database/sql"
 	"path/filepath"
 	"testing"
 
@@ -74,5 +75,22 @@ func TestWorkFold(t *testing.T) {
 	}
 	if _, ok := lists[0].Items[0].Fields["note"]; ok {
 		t.Fatal("null did not clear")
+	}
+}
+
+func TestPruneKeepsPrompts(t *testing.T) {
+	s := open(t)
+	ctx := t.Context()
+	s.Write(ctx, func(tx *sql.Tx) error {
+		s.InsertEvent(ctx, tx, EventRow{SessionID: "x", Kind: "prompt", Input: "hi", TS: 1})
+		s.InsertEvent(ctx, tx, EventRow{SessionID: "x", Kind: "tool_post", Tool: "Bash", TS: 1})
+		return nil
+	})
+	s.DB().Exec(`UPDATE events SET processed = 1`)
+	n, err := s.PruneEvents(ctx, 100)
+	var left int
+	s.DB().QueryRow(`SELECT count(*) FROM events WHERE kind = 'prompt'`).Scan(&left)
+	if err != nil || n != 1 || left != 1 {
+		t.Fatalf("pruned %d, prompts left %d, err %v", n, left, err)
 	}
 }

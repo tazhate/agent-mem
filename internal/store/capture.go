@@ -231,11 +231,12 @@ func (s *Store) MarkProcessed(ctx context.Context, ids []int64) error {
 	})
 }
 
-// PruneEvents drops processed raw events older than the cutoff.
+// PruneEvents drops processed tool events older than the cutoff.
 func (s *Store) PruneEvents(ctx context.Context, before int64) (int64, error) {
 	var n int64
 	err := s.Write(ctx, func(tx *sql.Tx) error {
-		res, err := tx.ExecContext(ctx, `DELETE FROM events WHERE processed = 1 AND ts < ?`, before)
+		// Prompts are the user's own history and stay; only bulky tool traffic expires.
+		res, err := tx.ExecContext(ctx, `DELETE FROM events WHERE processed = 1 AND ts < ? AND kind NOT IN ('prompt', 'turn_end')`, before)
 		if err != nil {
 			return err
 		}
