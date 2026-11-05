@@ -21,13 +21,13 @@ import (
 	"time"
 	"unicode/utf8"
 
-	"agent-mem/internal/adapter"
-	"agent-mem/internal/config"
-	"agent-mem/internal/event"
-	"agent-mem/internal/project"
-	"agent-mem/internal/recall"
-	"agent-mem/internal/redact"
-	"agent-mem/internal/store"
+	"github.com/tazhate/agent-mem/internal/adapter"
+	"github.com/tazhate/agent-mem/internal/config"
+	"github.com/tazhate/agent-mem/internal/event"
+	"github.com/tazhate/agent-mem/internal/project"
+	"github.com/tazhate/agent-mem/internal/recall"
+	"github.com/tazhate/agent-mem/internal/redact"
+	"github.com/tazhate/agent-mem/internal/store"
 )
 
 var ErrRunning = errors.New("daemon already running")

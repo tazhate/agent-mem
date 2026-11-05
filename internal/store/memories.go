@@ -12,7 +12,7 @@ import (
 	"time"
 	"unicode"
 
-	"agent-mem/internal/stem"
+	"github.com/tazhate/agent-mem/internal/stem"
 )
 
 // Types is the closed set of memory types.

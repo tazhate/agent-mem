@@ -4,7 +4,7 @@ import (
 	"path/filepath"
 	"testing"
 
-	"agent-mem/internal/stem"
+	"github.com/tazhate/agent-mem/internal/stem"
 )
 
 func open(t *testing.T) *Store {

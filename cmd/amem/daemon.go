@@ -9,10 +9,10 @@ import (
 	"os/signal"
 	"syscall"
 
-	"agent-mem/internal/config"
-	"agent-mem/internal/daemon"
-	"agent-mem/internal/mcpserver"
-	"agent-mem/internal/store"
+	"github.com/tazhate/agent-mem/internal/config"
+	"github.com/tazhate/agent-mem/internal/daemon"
+	"github.com/tazhate/agent-mem/internal/mcpserver"
+	"github.com/tazhate/agent-mem/internal/store"
 )
 
 func init() {

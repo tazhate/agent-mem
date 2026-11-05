@@ -6,9 +6,9 @@ import (
 	"strings"
 	"time"
 
-	"agent-mem/internal/event"
-	"agent-mem/internal/recall"
-	"agent-mem/internal/store"
+	"github.com/tazhate/agent-mem/internal/event"
+	"github.com/tazhate/agent-mem/internal/recall"
+	"github.com/tazhate/agent-mem/internal/store"
 )
 
 type turn struct {

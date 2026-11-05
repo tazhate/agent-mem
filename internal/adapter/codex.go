@@ -1,6 +1,6 @@
 package adapter
 
-import "agent-mem/internal/event"
+import "github.com/tazhate/agent-mem/internal/event"
 
 // codex handles Codex CLI hooks (also used by Qoder). Payloads mirror Claude Code plus turn_id,
 // last_assistant_message and model.

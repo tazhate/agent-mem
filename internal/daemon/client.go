@@ -11,7 +11,7 @@ import (
 	"syscall"
 	"time"
 
-	"agent-mem/internal/config"
+	"github.com/tazhate/agent-mem/internal/config"
 )
 
 // Call sends one request and waits for the answer within timeout.

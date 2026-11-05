@@ -6,7 +6,7 @@ import (
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 
-	"agent-mem/internal/daemon"
+	"github.com/tazhate/agent-mem/internal/daemon"
 )
 
 func TestTools(t *testing.T) {

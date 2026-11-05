@@ -9,9 +9,9 @@ import (
 	"slices"
 	"strings"
 
-	"agent-mem/internal/config"
-	"agent-mem/internal/install"
-	"agent-mem/internal/provider"
+	"github.com/tazhate/agent-mem/internal/config"
+	"github.com/tazhate/agent-mem/internal/install"
+	"github.com/tazhate/agent-mem/internal/provider"
 )
 
 func init() {

@@ -1,6 +1,6 @@
 package adapter
 
-import "agent-mem/internal/event"
+import "github.com/tazhate/agent-mem/internal/event"
 
 // gemini handles Gemini CLI hooks configured in ~/.gemini/settings.json.
 type gemini struct{}

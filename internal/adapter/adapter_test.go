@@ -5,7 +5,7 @@ import (
 	"strings"
 	"testing"
 
-	"agent-mem/internal/event"
+	"github.com/tazhate/agent-mem/internal/event"
 )
 
 func env(m map[string]string) Env { return func(k string) string { return m[k] } }

@@ -12,9 +12,9 @@ import (
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 
-	"agent-mem/internal/config"
-	"agent-mem/internal/daemon"
-	"agent-mem/internal/store"
+	"github.com/tazhate/agent-mem/internal/config"
+	"github.com/tazhate/agent-mem/internal/daemon"
+	"github.com/tazhate/agent-mem/internal/store"
 )
 
 // Caller sends an API op to the daemon. The stdio server uses the socket; the daemon's own

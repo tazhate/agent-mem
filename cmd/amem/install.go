@@ -6,7 +6,7 @@ import (
 	"os"
 	"strings"
 
-	"agent-mem/internal/install"
+	"github.com/tazhate/agent-mem/internal/install"
 )
 
 func init() {

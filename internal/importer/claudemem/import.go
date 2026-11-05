@@ -17,8 +17,8 @@ import (
 	"strings"
 	"time"
 
-	"agent-mem/internal/project"
-	"agent-mem/internal/store"
+	"github.com/tazhate/agent-mem/internal/project"
+	"github.com/tazhate/agent-mem/internal/store"
 )
 
 const origin = "claude-mem"
@@ -125,7 +125,7 @@ func Run(ctx context.Context, dst *store.Store, opt Options) (*Report, error) {
 	return im.rep, nil
 }
 
-// baseProject strips the worktree suffix claude-mem appends ("api/wt-feature" -> "infra").
+// baseProject strips the worktree suffix claude-mem appends ("api/wt-feature" -> "api").
 func baseProject(project, merged string) string {
 	p := cmp.Or(strings.TrimSpace(merged), strings.TrimSpace(project))
 	if i := strings.IndexByte(p, '/'); i > 0 {
@@ -393,7 +393,9 @@ func (im *importer) observations(ctx context.Context) error {
 		}); err != nil {
 			return err
 		}
-		fmt.Fprintf(im.log, "\r  observations   %d imported", im.rep.Memories)
+		if im.rep.Memories%20000 < len(batch) {
+			fmt.Fprintf(im.log, "  observations   %d imported\n", im.rep.Memories)
+		}
 	}
 }
 

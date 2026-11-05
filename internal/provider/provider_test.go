@@ -11,7 +11,7 @@ import (
 	"sync/atomic"
 	"testing"
 
-	"agent-mem/internal/config"
+	"github.com/tazhate/agent-mem/internal/config"
 )
 
 var schema = map[string]any{"type": "object", "properties": map[string]any{"ok": map[string]any{"type": "boolean"}}, "required": []string{"ok"}}

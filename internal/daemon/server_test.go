@@ -10,9 +10,9 @@ import (
 	"strings"
 	"testing"
 
-	"agent-mem/internal/config"
-	"agent-mem/internal/event"
-	"agent-mem/internal/store"
+	"github.com/tazhate/agent-mem/internal/config"
+	"github.com/tazhate/agent-mem/internal/event"
+	"github.com/tazhate/agent-mem/internal/store"
 )
 
 func newServer(t *testing.T, mode string) (*Server, string) {

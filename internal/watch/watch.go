@@ -14,8 +14,8 @@ import (
 	"strings"
 	"time"
 
-	"agent-mem/internal/event"
-	"agent-mem/internal/store"
+	"github.com/tazhate/agent-mem/internal/event"
+	"github.com/tazhate/agent-mem/internal/store"
 )
 
 // Parser converts one transcript line into zero or more events. State is per file.

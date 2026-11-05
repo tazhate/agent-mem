@@ -5,8 +5,8 @@ import (
 	"path/filepath"
 	"testing"
 
-	"agent-mem/internal/event"
-	"agent-mem/internal/store"
+	"github.com/tazhate/agent-mem/internal/event"
+	"github.com/tazhate/agent-mem/internal/store"
 )
 
 func TestCodexRollout(t *testing.T) {

@@ -12,7 +12,7 @@ import (
 	"fmt"
 	"strings"
 
-	"agent-mem/internal/config"
+	"github.com/tazhate/agent-mem/internal/config"
 )
 
 type Request struct {

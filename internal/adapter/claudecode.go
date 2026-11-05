@@ -1,7 +1,7 @@
 package adapter
 
 import (
-	"agent-mem/internal/event"
+	"github.com/tazhate/agent-mem/internal/event"
 )
 
 // claudeCode handles Claude Code hooks (and Qwen Code, which uses the same payloads).

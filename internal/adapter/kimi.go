@@ -1,6 +1,6 @@
 package adapter
 
-import "agent-mem/internal/event"
+import "github.com/tazhate/agent-mem/internal/event"
 
 // kimi handles Kimi Code hooks ([[hooks]] blocks in $KIMI_CODE_HOME/config.toml). Payloads follow
 // the Claude Code field names; the prompt is a ContentPart[] list and Read uses "path". Context

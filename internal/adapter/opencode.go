@@ -3,7 +3,7 @@ package adapter
 import (
 	"encoding/json"
 
-	"agent-mem/internal/event"
+	"github.com/tazhate/agent-mem/internal/event"
 )
 
 // opencode receives payloads from the amem OpenCode plugin shim, which already sends

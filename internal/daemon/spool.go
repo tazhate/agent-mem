@@ -7,7 +7,7 @@ import (
 	"os"
 	"syscall"
 
-	"agent-mem/internal/event"
+	"github.com/tazhate/agent-mem/internal/event"
 )
 
 // SpoolAppend stores an event for the daemon to pick up later. Writers hold an exclusive flock

@@ -1,4 +1,4 @@
-module agent-mem
+module github.com/tazhate/agent-mem
 
 go 1.26.0
 

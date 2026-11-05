@@ -13,9 +13,9 @@ import (
 	"testing"
 	"time"
 
-	"agent-mem/internal/config"
-	"agent-mem/internal/stem"
-	"agent-mem/internal/store"
+	"github.com/tazhate/agent-mem/internal/config"
+	"github.com/tazhate/agent-mem/internal/stem"
+	"github.com/tazhate/agent-mem/internal/store"
 )
 
 const dim = 256

@@ -9,7 +9,7 @@ import (
 	"strings"
 	"unicode/utf8"
 
-	"agent-mem/internal/event"
+	"github.com/tazhate/agent-mem/internal/event"
 )
 
 // MaxContextChars stays under the 10 000 character cap Claude Code and Codex apply to additionalContext.

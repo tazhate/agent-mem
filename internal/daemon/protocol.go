@@ -6,7 +6,7 @@ import (
 	"encoding/json"
 	"runtime/debug"
 
-	"agent-mem/internal/event"
+	"github.com/tazhate/agent-mem/internal/event"
 )
 
 // Version identifies the build (release + git revision); a hook from a different build makes
@@ -46,14 +46,14 @@ func buildVersion() string {
 const ProtocolVersion = 1
 
 type Request struct {
-	V       int             `json:"v"`
-	Version string          `json:"version"`
-	Op      string          `json:"op"`
-	Event   *event.Event    `json:"event,omitempty"`
+	V       int          `json:"v"`
+	Version string       `json:"version"`
+	Op      string       `json:"op"`
+	Event   *event.Event `json:"event,omitempty"`
 	// NoContext: the runtime cannot inject context for this hook, so skip recall (and do not
 	// mark anything as shown).
-	NoContext bool `json:"no_context,omitempty"`
-	Params  json.RawMessage `json:"params,omitempty"`
+	NoContext bool            `json:"no_context,omitempty"`
+	Params    json.RawMessage `json:"params,omitempty"`
 }
 
 type Response struct {

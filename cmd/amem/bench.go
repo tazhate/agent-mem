@@ -11,8 +11,8 @@ import (
 	"strings"
 	"time"
 
-	"agent-mem/internal/recall"
-	"agent-mem/internal/store"
+	"github.com/tazhate/agent-mem/internal/recall"
+	"github.com/tazhate/agent-mem/internal/store"
 )
 
 func init() {

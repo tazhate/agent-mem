@@ -10,9 +10,9 @@ import (
 	"strings"
 	"time"
 
-	"agent-mem/internal/config"
-	"agent-mem/internal/importer/claudemem"
-	"agent-mem/internal/store"
+	"github.com/tazhate/agent-mem/internal/config"
+	"github.com/tazhate/agent-mem/internal/importer/claudemem"
+	"github.com/tazhate/agent-mem/internal/store"
 )
 
 func init() {

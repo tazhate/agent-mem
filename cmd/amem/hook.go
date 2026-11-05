@@ -7,10 +7,10 @@ import (
 	"os"
 	"time"
 
-	"agent-mem/internal/adapter"
-	"agent-mem/internal/config"
-	"agent-mem/internal/daemon"
-	"agent-mem/internal/event"
+	"github.com/tazhate/agent-mem/internal/adapter"
+	"github.com/tazhate/agent-mem/internal/config"
+	"github.com/tazhate/agent-mem/internal/daemon"
+	"github.com/tazhate/agent-mem/internal/event"
 )
 
 func init() {

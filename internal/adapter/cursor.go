@@ -3,7 +3,7 @@ package adapter
 import (
 	"encoding/json"
 
-	"agent-mem/internal/event"
+	"github.com/tazhate/agent-mem/internal/event"
 )
 
 // cursor handles Cursor hooks from ~/.cursor/hooks.json. Context can only be injected on

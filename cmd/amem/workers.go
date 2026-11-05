@@ -4,10 +4,10 @@ import (
 	"context"
 	"log/slog"
 
-	"agent-mem/internal/config"
-	"agent-mem/internal/daemon"
-	"agent-mem/internal/embed"
-	"agent-mem/internal/observer"
+	"github.com/tazhate/agent-mem/internal/config"
+	"github.com/tazhate/agent-mem/internal/daemon"
+	"github.com/tazhate/agent-mem/internal/embed"
+	"github.com/tazhate/agent-mem/internal/observer"
 )
 
 // attachWorkers wires background workers into the daemon.

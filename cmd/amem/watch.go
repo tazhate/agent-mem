@@ -9,10 +9,10 @@ import (
 	"syscall"
 	"time"
 
-	"agent-mem/internal/daemon"
-	"agent-mem/internal/event"
-	"agent-mem/internal/store"
-	"agent-mem/internal/watch"
+	"github.com/tazhate/agent-mem/internal/daemon"
+	"github.com/tazhate/agent-mem/internal/event"
+	"github.com/tazhate/agent-mem/internal/store"
+	"github.com/tazhate/agent-mem/internal/watch"
 )
 
 func init() {

@@ -1,7 +1,6 @@
 package daemon
 
 import (
-	"agent-mem/internal/event"
 	"cmp"
 	"context"
 	"encoding/json"
@@ -10,7 +9,8 @@ import (
 	"strings"
 	"time"
 
-	"agent-mem/internal/store"
+	"github.com/tazhate/agent-mem/internal/event"
+	"github.com/tazhate/agent-mem/internal/store"
 )
 
 // SearchHit is one row of a search answer: the index line plus enough to decide on fetching.

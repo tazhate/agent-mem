@@ -1,5 +1,7 @@
 # amem
 
+[![ci](https://github.com/tazhate/agent-mem/actions/workflows/ci.yml/badge.svg)](https://github.com/tazhate/agent-mem/actions/workflows/ci.yml)
+
 Память между сессиями для AI-агентов: Claude Code, Codex, Gemini CLI, Cursor, OpenCode. Один статический Go-бинарь, одна SQLite, без Node, Python и векторной базы. Замена claude-mem с переносом данных.
 
 Что делает. Хуки пишут события сессии в локальный демон. Observer раз за ход сжимает их в короткие записи через выбранную модель. Recall подсовывает агенту нужное в нужный момент: на старте сессии, на промпт, перед чтением файла с историей, на упавшую команду, после compact. Поиск локальный, p99 18 мс на 108 тыс. записей, так что срабатывает он часто и ничего не ждет.
@@ -8,10 +10,14 @@
 
 ## Установка
 
+Готовый бинарь для Linux и macOS (amd64, arm64) лежит в [релизах](https://github.com/tazhate/agent-mem/releases). Или из исходников, нужен Go 1.26:
+
 ```bash
-go build -trimpath -ldflags="-s -w" -o ~/.local/bin/amem ./cmd/amem
+go install github.com/tazhate/agent-mem/cmd/amem@latest
 amem init
 ```
+
+Windows не поддерживается: демон работает через unix-сокет и flock.
 
 `amem init` спрашивает четыре вещи:
 

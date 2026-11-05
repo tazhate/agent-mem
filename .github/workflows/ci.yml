@@ -1,0 +1,80 @@
+name: ci
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - name: gofmt
+        run: |
+          out=$(gofmt -l .)
+          if [ -n "$out" ]; then echo "not gofmt-ed:"; echo "$out"; exit 1; fi
+      - name: go vet
+        run: go vet ./...
+      - name: go mod tidy
+        run: |
+          go mod tidy
+          git diff --exit-code go.mod go.sum
+
+  test:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - name: git identity for tests that init repos
+        run: git config --global user.email ci@example.com && git config --global user.name ci
+      - name: go test -race
+        run: go test -race -count=1 ./...
+      - name: benchmarks (smoke)
+        run: go test -run '^$' -bench Search110k -benchtime 3x ./internal/embed/
+
+  durability:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - run: go build -o amem ./cmd/amem
+      - name: kill -9 the daemon under 200 parallel hooks
+        run: AMEM_HOME=$RUNNER_TEMP/amem-dur ./scripts/durability.sh
+
+  build:
+    needs: [lint, test]
+    strategy:
+      matrix:
+        goos: [linux, darwin]
+        goarch: [amd64, arm64]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - name: build
+        env:
+          CGO_ENABLED: "0"
+          GOOS: ${{ matrix.goos }}
+          GOARCH: ${{ matrix.goarch }}
+        run: go build -trimpath -ldflags="-s -w" -o dist/amem-${{ matrix.goos }}-${{ matrix.goarch }} ./cmd/amem
+      - uses: actions/upload-artifact@v4
+        with:
+          name: amem-${{ matrix.goos }}-${{ matrix.goarch }}
+          path: dist/

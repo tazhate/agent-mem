@@ -5,7 +5,7 @@ import (
 	"os/signal"
 	"syscall"
 
-	"agent-mem/internal/mcpserver"
+	"github.com/tazhate/agent-mem/internal/mcpserver"
 )
 
 func init() {

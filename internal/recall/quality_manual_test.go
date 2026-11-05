@@ -5,8 +5,8 @@ import (
 	"os"
 	"testing"
 
-	"agent-mem/internal/config"
-	"agent-mem/internal/store"
+	"github.com/tazhate/agent-mem/internal/config"
+	"github.com/tazhate/agent-mem/internal/store"
 )
 
 // TestManualQuality prints recall for real prompts; run with AMEM_QUALITY_DB=/path/amem.db.

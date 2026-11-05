@@ -13,10 +13,10 @@ import (
 	"strings"
 	"time"
 
-	"agent-mem/internal/config"
-	"agent-mem/internal/event"
-	"agent-mem/internal/stem"
-	"agent-mem/internal/store"
+	"github.com/tazhate/agent-mem/internal/config"
+	"github.com/tazhate/agent-mem/internal/event"
+	"github.com/tazhate/agent-mem/internal/stem"
+	"github.com/tazhate/agent-mem/internal/store"
 )
 
 // VectorSearcher is implemented by the embedding index when one is configured.

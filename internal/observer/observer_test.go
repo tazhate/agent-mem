@@ -12,10 +12,10 @@ import (
 
 	"database/sql"
 
-	"agent-mem/internal/config"
-	"agent-mem/internal/provider"
-	"agent-mem/internal/recall"
-	"agent-mem/internal/store"
+	"github.com/tazhate/agent-mem/internal/config"
+	"github.com/tazhate/agent-mem/internal/provider"
+	"github.com/tazhate/agent-mem/internal/recall"
+	"github.com/tazhate/agent-mem/internal/store"
 )
 
 type fake struct {
