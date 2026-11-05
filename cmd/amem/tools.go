@@ -11,6 +11,7 @@ import (
 
 	"github.com/tazhate/agent-mem/internal/config"
 	"github.com/tazhate/agent-mem/internal/daemon"
+	"github.com/tazhate/agent-mem/internal/mcpserver"
 	"github.com/tazhate/agent-mem/internal/store"
 )
 
@@ -37,8 +38,7 @@ func cmdSearch(args []string) int {
 	typ := fs.String("type", "", "comma-separated types")
 	limit := fs.Int("n", 10, "results")
 	asJSON := fs.Bool("json", false, "JSON output")
-	fs.Parse(args)
-	q := strings.Join(fs.Args(), " ")
+	q := strings.Join(parseInterspersed(fs, args), " ")
 	if q == "" {
 		return fail("empty query")
 	}
@@ -60,6 +60,10 @@ func cmdSearch(args []string) int {
 	if *asJSON {
 		return printJSON(hits)
 	}
+	if len(hits) == 0 {
+		fmt.Fprintln(os.Stderr, "no matches")
+		return 1
+	}
 	for _, h := range hits {
 		fmt.Printf("#%-7d %s %-10s %-18s %s (~%dt, %.2f)\n", h.ID, h.Date, h.Type, clipStr(h.Project, 18), h.Title, h.Tokens, h.Score)
 	}
@@ -67,6 +71,9 @@ func cmdSearch(args []string) int {
 }
 
 func cmdShow(args []string) int {
+	if len(args) == 0 {
+		return fail("usage: amem show <id>...")
+	}
 	var ids []int64
 	for _, a := range args {
 		id, err := strconv.ParseInt(strings.TrimPrefix(a, "#"), 10, 64)
@@ -79,18 +86,25 @@ func cmdShow(args []string) int {
 	if err := daemon.CallData(loadCfg(), daemon.OpGet, daemon.GetParams{IDs: ids, IncludePrivate: true}, &mems); err != nil {
 		return fail("%v", err)
 	}
+	found := map[int64]bool{}
 	for _, m := range mems {
-		fmt.Printf("#%d %s [%s] %s\n%s\n", m.ID, m.Type, m.Project, time.UnixMilli(m.CreatedAt).Format("2006-01-02 15:04"), m.Title)
-		if m.Body != "" {
-			fmt.Printf("\n%s\n", m.Body)
+		found[m.ID] = true
+	}
+	for _, id := range ids {
+		if !found[id] {
+			fmt.Fprintf(os.Stderr, "not found: #%d\n", id)
 		}
-		for _, f := range m.Facts {
-			fmt.Printf("- %s\n", f)
+	}
+	for _, m := range mems {
+		fmt.Print(strings.TrimSuffix(mcpserver.FormatMemories([]*store.Memory{m}), "\n"))
+		priv := ""
+		if m.Private {
+			priv = ", private (never shown to agents)"
 		}
-		if len(m.Files) > 0 {
-			fmt.Printf("files: %s\n", strings.Join(m.Files, ", "))
-		}
-		fmt.Printf("used %d / injected %d\n\n", m.UseCount, m.InjectCount)
+		fmt.Printf("used %d / injected %d%s\n\n", m.UseCount, m.InjectCount, priv)
+	}
+	if len(mems) < len(ids) {
+		return 1
 	}
 	return 0
 }
@@ -108,6 +122,10 @@ func cmdShadow(args []string) int {
 	if err := daemon.CallData(loadCfg(), daemon.OpShadow, struct{}{}, &rows); err != nil {
 		return fail("%v", err)
 	}
+	if len(rows) == 0 {
+		fmt.Println("no shadow injections in the last 7 days")
+		return 0
+	}
 	for _, r := range rows {
 		fmt.Printf("%s %-14s %-40s #%d %s\n", time.UnixMilli(r.TS).Format("01-02 15:04"), r.Trigger, clipStr(r.SessionID, 40), r.MemoryID, r.Title)
 	}
@@ -119,10 +137,10 @@ func cmdSave(args []string) int {
 	global := fs.Bool("global", false, "visible in every project")
 	typ := fs.String("type", "", "memory type")
 	title := fs.String("title", "", "title (default: first line)")
-	fs.Parse(args)
+	text := strings.Join(parseInterspersed(fs, args), " ")
 	cwd, _ := os.Getwd()
 	var out map[string]any
-	if err := daemon.CallData(loadCfg(), daemon.OpSave, daemon.SaveParams{Text: strings.Join(fs.Args(), " "), Title: *title, Type: *typ, Global: *global, Cwd: cwd}, &out); err != nil {
+	if err := daemon.CallData(loadCfg(), daemon.OpSave, daemon.SaveParams{Text: text, Title: *title, Type: *typ, Global: *global, Cwd: cwd}, &out); err != nil {
 		return fail("%v", err)
 	}
 	return printJSON(out)
@@ -144,5 +162,3 @@ func clipStr(s string, n int) string {
 	}
 	return s
 }
-
-func jsonUnmarshal(b []byte, v any) error { return json.Unmarshal(b, v) }

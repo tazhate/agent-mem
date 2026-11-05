@@ -247,7 +247,11 @@ func (s *Server) serve(ctx context.Context, conn net.Conn) {
 		after()
 	}
 	if s.shouldRestart(&req) && s.restart.CompareAndSwap(false, true) {
-		s.log.Info("exiting so the new binary takes over", "client", req.Version, "daemon", Version, "op", req.Op)
+		if req.Op == OpRestart {
+			s.log.Info("stopping on request; the next hook starts a fresh daemon")
+		} else {
+			s.log.Info("exiting so the rebuilt binary takes over", "client", req.Version, "daemon", Version)
+		}
 		go func() { time.Sleep(200 * time.Millisecond); s.cancel() }()
 	}
 }
@@ -267,6 +271,9 @@ func (s *Server) handle(ctx context.Context, req *Request) (Response, func()) {
 	var data any
 	var err error
 	var after func()
+	if req.V != 0 && req.V != ProtocolVersion {
+		return Response{V: ProtocolVersion, Error: fmt.Sprintf("protocol %d not supported (daemon speaks %d)", req.V, ProtocolVersion)}, nil
+	}
 	switch req.Op {
 	case OpPing:
 		data = map[string]any{"version": Version, "pid": os.Getpid(), "exe": selfExe(), "warnings": s.cfg.Warnings}
@@ -282,7 +289,11 @@ func (s *Server) handle(ctx context.Context, req *Request) (Response, func()) {
 		data, err = s.api(ctx, req.Op, req.Params)
 	}
 	if err != nil {
-		s.log.Error("request failed", "op", req.Op, "err", err)
+		level := slog.LevelWarn // mostly bad input from a tool call
+		if req.Op == OpEvent {
+			level = slog.LevelError
+		}
+		s.log.Log(ctx, level, "request failed", "op", req.Op, "err", err)
 		return Response{V: ProtocolVersion, Error: err.Error()}, nil
 	}
 	if data != nil {
@@ -550,5 +561,5 @@ func Elide(s string, limit int) string {
 	for start < len(s) && !utf8.RuneStart(s[start]) {
 		start++
 	}
-	return s[:head] + fmt.Sprintf("\n…[%d chars elided]…\n", start-head) + s[start:]
+	return s[:head] + fmt.Sprintf("\n…[%d bytes elided]…\n", start-head) + s[start:]
 }

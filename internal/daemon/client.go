@@ -46,8 +46,8 @@ func Call(cfg *config.Config, req *Request, timeout time.Duration) (*Response, e
 	if err := json.Unmarshal(line, &resp); err != nil {
 		return nil, err
 	}
-	if !resp.OK && resp.Error != "" {
-		return &resp, errors.New(resp.Error)
+	if !resp.OK {
+		return &resp, errors.New(cmpOr(resp.Error, "daemon returned an error without details"))
 	}
 	return &resp, nil
 }
@@ -64,7 +64,8 @@ func CallData(cfg *config.Config, op string, params, out any) error {
 		if err := Spawn(cfg); err != nil {
 			return err
 		}
-		if !WaitReady(cfg, 3*time.Second) {
+		// The first start after an upgrade may run migrations for several seconds.
+		if !WaitReady(cfg, 20*time.Second) {
 			return fmt.Errorf("daemon did not start; see %s", cfg.LogPath())
 		}
 		resp, err = Call(cfg, req, 10*time.Second)
@@ -131,4 +132,11 @@ func selfExe() string {
 		return p
 	}
 	return exe
+}
+
+func cmpOr(a, b string) string {
+	if a != "" {
+		return a
+	}
+	return b
 }

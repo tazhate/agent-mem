@@ -69,7 +69,7 @@ Subcommands of the single binary:
 
 If the daemon is unavailable, the hook appends the event to `spool.jsonl` (`O_APPEND`, one line) and exits with code 0. On start the daemon drains the spool. The hook never blocks the session on any error except a broken config of its own.
 
-The hook<->daemon protocol version is checked on every connection. On a mismatch the daemon restarts itself from the new binary. A situation like "worker on 15.4.0, plugin on 15.6.0" is ruled out by design.
+Every request carries the wire protocol version and the client build. A request with a different protocol version is refused. A different build of the same binary file (it was replaced on disk) makes the daemon exit after answering, so the next hook starts the new one; other installed copies of amem never restart it. A situation like "worker on 15.4.0 while the plugin is 15.6.0" cannot happen by construction.
 
 ## Storage and search
 
@@ -143,7 +143,7 @@ Records with `superseded_by` set never appear in results.
 
 An unknown type becomes `discovery`. Title up to 80 characters, body up to 600, facts as a list. The output language is a single setting, not 28 mode files.
 
-**Update instead of accumulate.** Each batch comes with the 5 closest existing records by project and files. The model can return `supersedes: [ids]` or `update: {id, body}`. Outdated records are marked and drop out of results. A year from now the database holds current knowledge, not 108k layers of history.
+**Update instead of accumulate.** Each batch comes with up to 10 related existing records: 5 by the files it touches and 5 by text search. The model can return `supersedes: [ids]` or `update: {id, body}`. Outdated records are marked and drop out of results. A year from now the database holds current knowledge, not 108k layers of history.
 
 **Stateless.** Every batch is an independent call. No long SDK session, no `memorySessionId`, no generator restart loops.
 
@@ -214,7 +214,7 @@ An adapter does two things: it parses a specific runtime's stdin into this event
 | Gemini CLI, Cursor, OpenCode | their hooks/plugin API | per each API |
 | Anything else | `amem watch`: tailing JSONL transcripts (`~/.claude/projects`, `~/.codex/sessions` and so on) | MCP and an `AGENTS.md` block only |
 
-`amem install <runtime>` writes the hooks and MCP into that runtime's config and supports `--uninstall`. No nvm tricks in `PATH`: the binary lives in `~/.local/bin`.
+`amem install <runtime>` writes the hooks and MCP into that runtime's config and supports `--uninstall`. No nvm tricks in `PATH`: hooks call the absolute path of the binary that ran `amem install` (or the copy on `PATH` if it is the same file).
 
 ## Migrating from claude-mem
 
@@ -223,7 +223,7 @@ amem import claude-mem --db ~/.claude-mem/claude-mem.db --dry-run
 amem import claude-mem --db ~/.claude-mem/claude-mem.db
 ```
 
-**Reading.** The source database is never opened for writing and never locked. The import takes a snapshot into a temporary file through the SQLite backup API and reads that. The claude-mem worker can keep running.
+**Reading.** The source database is opened read-only and never locked; a running claude-mem worker can keep writing. Rows added meanwhile are picked up by the next run, since the import is idempotent.
 
 **Mapping:**
 

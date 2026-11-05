@@ -3,6 +3,7 @@ package daemon
 import (
 	"cmp"
 	"context"
+	"database/sql"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -55,10 +56,16 @@ func (s *Server) api(ctx context.Context, op string, raw json.RawMessage) (any, 
 			return nil, err
 		}
 		sc.Types = p.Types
+		for _, t := range p.Types {
+			if !store.ValidType(t) {
+				return nil, fmt.Errorf("unknown type %q (valid: %s)", t, strings.Join(store.Types, ", "))
+			}
+		}
 		limit := p.Limit
-		if limit <= 0 || limit > 50 {
+		if limit <= 0 {
 			limit = 10
 		}
+		limit = min(limit, 50)
 		res, err := s.rec.Search(ctx, p.Query, sc, limit)
 		if err != nil {
 			return nil, err
@@ -94,7 +101,11 @@ func (s *Server) api(ctx context.Context, op string, raw json.RawMessage) (any, 
 		if err := json.Unmarshal(raw, &p); err != nil {
 			return nil, err
 		}
-		return s.st.Timeline(ctx, p.Anchor, cmp.Or(p.Before, 5), cmp.Or(p.After, 5))
+		mems, err := s.st.Timeline(ctx, p.Anchor, min(cmp.Or(p.Before, 5), 50), min(cmp.Or(p.After, 5), 50))
+		if errors.Is(err, sql.ErrNoRows) {
+			return nil, fmt.Errorf("memory #%d not found", p.Anchor)
+		}
+		return mems, err
 	case OpSave:
 		var p SaveParams
 		if err := json.Unmarshal(raw, &p); err != nil {
@@ -106,8 +117,11 @@ func (s *Server) api(ctx context.Context, op string, raw json.RawMessage) (any, 
 		if redact.IsFullyPrivate(p.Text) {
 			return nil, errors.New("text is entirely <private>; nothing to save")
 		}
+		if p.Type != "" && !store.ValidType(p.Type) {
+			return nil, fmt.Errorf("unknown type %q (valid: %s)", p.Type, strings.Join(store.Types, ", "))
+		}
 		m := &store.Memory{Type: p.Type, Title: s.red.Clean(p.Title), Body: s.red.Clean(p.Text), Files: p.Files, Origin: "manual"}
-		if !store.ValidType(m.Type) {
+		if m.Type == "" {
 			m.Type = "discovery"
 			if p.Global {
 				m.Type = "preference"

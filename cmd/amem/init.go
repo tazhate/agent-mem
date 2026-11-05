@@ -182,7 +182,7 @@ func cmdInit(args []string) int {
 	fmt.Printf("wrote %s\n", path)
 	// A running daemon keeps its old settings until restarted; the next hook starts it again.
 	if _, err := daemon.Call(cfg, &daemon.Request{Op: daemon.OpRestart}, time.Second); err == nil {
-		fmt.Println("restarted the daemon to apply the new settings")
+		fmt.Println("stopped the running daemon; the next hook starts it with the new settings")
 	}
 
 	o, err := installOptions(false, false)

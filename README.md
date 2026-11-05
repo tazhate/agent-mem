@@ -19,7 +19,7 @@ amem init
 
 Windows is not supported: the daemon relies on a unix socket and flock.
 
-`amem init` asks four questions:
+`amem init` asks about four things (plus model names, URLs and keys where needed, and which runtimes to install):
 
 - **Observer** - what writes the memories. A subscription CLI (`claude`, `codex`, `gemini`: your own login, shared limits) or an API key (`anthropic`, or `openai`, which means any OpenAI-compatible server: OpenRouter, Ollama, vLLM, DeepSeek). The key is stored as a reference: `env:NAME`, `cmd:vault kv get ...`, `file:path`.
 - **Embedder** - `static` (default: a built-in multilingual model2vec model, no service, one 530 MB download, about 3 minutes for 100k memories), `none` (full-text search only, with ru/en stemming), Ollama, or any `/v1/embeddings` endpoint. `amem embed pull` downloads the static model and checks its sha256.
@@ -74,15 +74,20 @@ Switchover order:
 
 | Command | Purpose |
 |---|---|
-| `amem search [--project P\|all] [--type T] query` | search, the way the agent sees it |
-| `amem show 123 456` | full memories |
-| `amem save [--global] [--type T] text` | manual note; `--global` makes it visible in every project |
-| `amem doctor [--probe]` | daemon, hooks, provider, embedder, spool |
-| `amem embed pull [--model repo]` | download a model2vec model for `embed.kind = "static"` |
-| `amem stats` | database counters |
-| `amem watch --preset claude\|codex` | transcripts for runtimes without hooks (`--subagents-only` works with `codex` only) |
+| `amem init [--yes] [flags]` | interactive setup; every answer also exists as a flag (`amem init -h`) |
+| `amem install <runtime\|detected> [--dry-run] [--uninstall] [--no-mcp]` | hooks and MCP for a runtime |
+| `amem import claude-mem [--dry-run] [--raw 30d\|all] [--project-map FILE]` | migrate from claude-mem |
+| `amem doctor [--probe]` | daemon, hooks, provider, embedder, spool, config problems; exits 1 on any FAIL |
+| `amem search [--project P\|all] [--type T] [-n N] [--json] query` | search, the way the agent sees it; flags may go anywhere |
+| `amem show 123 456` | full memories, including private ones (agents never get those) |
+| `amem save [--global] [--type T] [--title T] text` | manual note; `--global` makes it visible in every project |
+| `amem stats` | database counters as JSON |
+| `amem shadow-report` | what shadow-mode recall would have injected in the last 7 days |
 | `amem scrub [--dry-run]` | re-apply the current redaction rules to everything already stored |
+| `amem embed pull [--model repo]` | download a model2vec model for `embed.kind = "static"` |
+| `amem watch --preset claude\|codex` | transcripts for runtimes without hooks (`--subagents-only` works with `codex` only) |
 | `amem bench recall\|hook` | latency on your own database (`hook` runs against a scratch daemon) |
+| `amem mcp` | MCP server on stdio (what the runtimes start) |
 
 MCP tools for the agent: `memory_search`, `memory_get`, `memory_timeline`, `memory_save`, `work_state`. Private memories are never returned to agents; `amem show` still prints them for you.
 

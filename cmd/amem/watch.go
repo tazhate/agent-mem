@@ -43,14 +43,13 @@ func cmdWatch(args []string) int {
 	home, _ := os.UserHomeDir()
 	sent := 0
 	send := func(ev *event.Event) error {
-		resp, err := daemon.Call(cfg, &daemon.Request{Op: daemon.OpEvent, Event: ev}, 5*time.Second)
+		_, err := daemon.Call(cfg, &daemon.Request{Op: daemon.OpEvent, Event: ev}, 5*time.Second)
 		if err != nil && daemon.IsUnavailable(err) {
 			_ = daemon.Spawn(cfg)
-			if daemon.WaitReady(cfg, 3*time.Second) {
-				resp, err = daemon.Call(cfg, &daemon.Request{Op: daemon.OpEvent, Event: ev}, 5*time.Second)
+			if daemon.WaitReady(cfg, 20*time.Second) {
+				_, err = daemon.Call(cfg, &daemon.Request{Op: daemon.OpEvent, Event: ev}, 5*time.Second)
 			}
 		}
-		_ = resp
 		if err != nil {
 			return daemon.SpoolAppend(cfg.SpoolPath(), ev)
 		}

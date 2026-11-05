@@ -2,15 +2,18 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"flag"
 	"fmt"
 	"os"
+	"slices"
 	"time"
 
 	"github.com/tazhate/agent-mem/internal/daemon"
 	"github.com/tazhate/agent-mem/internal/embed"
 	"github.com/tazhate/agent-mem/internal/install"
 	"github.com/tazhate/agent-mem/internal/provider"
+	"github.com/tazhate/agent-mem/internal/store"
 )
 
 func init() {
@@ -22,29 +25,46 @@ func cmdDoctor(args []string) int {
 	probe := fs.Bool("probe", false, "also send a tiny request to the observer provider and embedder")
 	fs.Parse(args)
 	cfg := loadCfg()
+	failures := 0
 	ok := func(good bool, format string, a ...any) {
 		mark := "ok  "
 		if !good {
 			mark = "FAIL"
+			failures++
 		}
 		fmt.Printf("%s %s\n", mark, fmt.Sprintf(format, a...))
 	}
 	fmt.Printf("config   %s\ndata     %s\n", cfg.File(), cfg.DataDir)
+	for _, w := range cfg.Warnings {
+		ok(false, "config: %s", w)
+	}
 
-	var ping map[string]any
+	var ping struct {
+		Version  string   `json:"version"`
+		PID      int      `json:"pid"`
+		Warnings []string `json:"warnings"`
+	}
 	resp, err := daemon.Call(cfg, &daemon.Request{Op: daemon.OpPing}, time.Second)
 	if err == nil {
-		_ = jsonUnmarshal(resp.Data, &ping)
-		pid, _ := ping["pid"].(float64)
-		ok(ping["version"] == daemon.Version, "daemon running, pid %d, version %v (binary %s)", int(pid), ping["version"], daemon.Version)
+		_ = json.Unmarshal(resp.Data, &ping)
+		ok(ping.Version == daemon.Version, "daemon running, pid %d, version %s (binary %s)", ping.PID, ping.Version, daemon.Version)
+		for _, w := range ping.Warnings {
+			if !slices.Contains(cfg.Warnings, w) {
+				ok(false, "daemon config: %s", w)
+			}
+		}
+		var stats struct {
+			Stats store.Stats `json:"stats"`
+		}
+		if err := daemon.CallData(cfg, daemon.OpStats, struct{}{}, &stats); err == nil {
+			st := stats.Stats
+			fmt.Printf("     memories %d, summaries %d, sessions %d, projects %d, events %d (pending %d), vectors %d\n",
+				st.Memories, st.Summaries, st.Sessions, st.Projects, st.Events, st.PendingEvents, st.Vectors)
+		} else {
+			ok(false, "stats: %v", err)
+		}
 	} else {
-		ok(true, "daemon not running (starts on the next hook): %v", err)
-	}
-	var stats map[string]any
-	if err := daemon.CallData(cfg, daemon.OpStats, struct{}{}, &stats); err == nil {
-		fmt.Printf("     db stats: %v\n", stats["stats"])
-	} else {
-		ok(false, "stats: %v", err)
+		fmt.Println("     daemon not running; the next hook (or any amem command) starts it")
 	}
 	if st, err := os.Stat(cfg.SpoolPath()); err == nil {
 		ok(st.Size() == 0, "spool has %d bytes waiting", st.Size())
@@ -90,7 +110,11 @@ func cmdDoctor(args []string) int {
 	case emb == nil:
 		fmt.Println("     embedder: none (full-text search only)")
 	default:
-		ok(true, "embedder: %s at %s", emb.Model(), cfg.Embed.BaseURL)
+		where := cfg.Embed.BaseURL
+		if cfg.Embed.Kind == "static" {
+			where = embed.StaticDir(cfg.Embed.Model, cfg.ModelsDir())
+		}
+		ok(true, "embedder: %s (%s) at %s", emb.Model(), cfg.Embed.Kind, where)
 		if *probe {
 			t := time.Now()
 			v, err := emb.Embed(ctx, []string{"probe"})
@@ -100,6 +124,9 @@ func cmdDoctor(args []string) int {
 			}
 			ok(err == nil, "embed probe %s: dim %d %v", time.Since(t).Round(time.Millisecond), dim, err)
 		}
+	}
+	if failures > 0 {
+		return 1
 	}
 	return 0
 }
