@@ -4,7 +4,11 @@ package mcpserver
 
 import (
 	"context"
+	"crypto/rand"
+	"crypto/subtle"
+	"encoding/hex"
 	"fmt"
+	"net"
 	"net/http"
 	"os"
 	"strings"
@@ -145,11 +149,52 @@ func RunStdio(ctx context.Context, cfg *config.Config) error {
 	return New(call, cwd).Run(ctx, &mcp.StdioTransport{})
 }
 
-// HTTPHandler serves streamable-HTTP MCP from inside the daemon.
-func HTTPHandler(call Caller) http.Handler {
-	return mcp.NewStreamableHTTPHandler(func(r *http.Request) *mcp.Server {
+// HTTPHandler serves streamable-HTTP MCP from inside the daemon. Every request must carry
+// "Authorization: Bearer <token>": the unix socket is protected by file permissions, a TCP
+// port is reachable by every local user.
+func HTTPHandler(call Caller, token string) http.Handler {
+	h := mcp.NewStreamableHTTPHandler(func(r *http.Request) *mcp.Server {
 		return New(call, r.URL.Query().Get("cwd"))
 	}, nil)
+	want := []byte("Bearer " + token)
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if token == "" || subtle.ConstantTimeCompare([]byte(r.Header.Get("Authorization")), want) != 1 {
+			http.Error(w, "unauthorized", http.StatusUnauthorized)
+			return
+		}
+		h.ServeHTTP(w, r)
+	})
+}
+
+// HTTPToken returns the bearer token stored at path, creating it (0600) on first use.
+func HTTPToken(path string) (string, error) {
+	if b, err := os.ReadFile(path); err == nil && len(strings.TrimSpace(string(b))) >= 32 {
+		return strings.TrimSpace(string(b)), nil
+	}
+	buf := make([]byte, 32)
+	if _, err := rand.Read(buf); err != nil {
+		return "", err
+	}
+	tok := hex.EncodeToString(buf)
+	if err := os.WriteFile(path, []byte(tok+"\n"), 0o600); err != nil {
+		return "", err
+	}
+	return tok, nil
+}
+
+// CheckLoopback refuses HTTP listen addresses other than loopback.
+func CheckLoopback(addr string) error {
+	host, _, err := net.SplitHostPort(addr)
+	if err != nil {
+		return err
+	}
+	if host == "localhost" {
+		return nil
+	}
+	if ip := net.ParseIP(host); ip != nil && ip.IsLoopback() {
+		return nil
+	}
+	return fmt.Errorf("daemon.http_addr %q: only loopback addresses are allowed", addr)
 }
 
 func text(s string) *mcp.CallToolResult {

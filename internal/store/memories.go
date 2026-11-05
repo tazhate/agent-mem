@@ -258,13 +258,27 @@ func (s *Store) queryMemories(ctx context.Context, q string, args ...any) ([]*Me
 	return out, rows.Err()
 }
 
-// GetMemories returns memories by id in the requested order.
+// GetMemories returns non-private memories by id in the requested order. This is what reaches
+// models (MCP memory_get, recall), so private records never leave the database this way.
 func (s *Store) GetMemories(ctx context.Context, ids []int64) ([]*Memory, error) {
+	return s.getMemories(ctx, ids, false)
+}
+
+// GetMemoriesAll includes private memories; for the local CLI only.
+func (s *Store) GetMemoriesAll(ctx context.Context, ids []int64) ([]*Memory, error) {
+	return s.getMemories(ctx, ids, true)
+}
+
+func (s *Store) getMemories(ctx context.Context, ids []int64, withPrivate bool) ([]*Memory, error) {
 	if len(ids) == 0 {
 		return nil, nil
 	}
 	ph, args := placeholders(ids)
-	list, err := s.queryMemories(ctx, `WHERE m.id IN (`+ph+`)`, args...)
+	q := `WHERE m.id IN (` + ph + `)`
+	if !withPrivate {
+		q += ` AND m.private = 0`
+	}
+	list, err := s.queryMemories(ctx, q, args...)
 	if err != nil {
 		return nil, err
 	}
@@ -387,7 +401,7 @@ func (s *Store) Recent(ctx context.Context, sc Scope, limit int) ([]*Memory, err
 
 // SessionMemories returns memories produced in a session, newest first.
 func (s *Store) SessionMemories(ctx context.Context, sessionID string, limit int) ([]*Memory, error) {
-	return s.queryMemories(ctx, `WHERE m.session_id = ? AND m.superseded_by IS NULL ORDER BY m.created_at DESC LIMIT ?`, sessionID, limit)
+	return s.queryMemories(ctx, `WHERE m.session_id = ? AND m.superseded_by IS NULL AND m.private = 0 ORDER BY m.created_at DESC LIMIT ?`, sessionID, limit)
 }
 
 // Timeline returns memories of the same project around an anchor memory.
@@ -481,4 +495,152 @@ func (s *Store) RebuildDF(ctx context.Context) error {
 		_, err := tx.ExecContext(ctx, `INSERT INTO stem_df(term, doc) SELECT term, doc FROM memories_vocab`)
 		return err
 	})
+}
+
+// ScrubReport counts rows changed by Scrub.
+type ScrubReport struct {
+	Memories, Summaries, Events, WorkEntries int
+}
+
+// Scrub re-applies a cleaning function to stored text (after redaction rules improve) and
+// reindexes changed memories. dryRun only counts.
+func (s *Store) Scrub(ctx context.Context, clean func(string) string, dryRun bool) (ScrubReport, error) {
+	var rep ScrubReport
+	var last int64
+	for {
+		mems, err := s.queryMemories(ctx, `WHERE m.id > ? ORDER BY m.id LIMIT 2000`, last)
+		if err != nil {
+			return rep, err
+		}
+		if len(mems) == 0 {
+			break
+		}
+		last = mems[len(mems)-1].ID
+		var changed []*Memory
+		for _, m := range mems {
+			t, b := clean(m.Title), clean(m.Body)
+			facts := make([]string, len(m.Facts))
+			diff := t != m.Title || b != m.Body
+			for i, f := range m.Facts {
+				facts[i] = clean(f)
+				diff = diff || facts[i] != f
+			}
+			if diff {
+				m.Title, m.Body, m.Facts = t, b, facts
+				changed = append(changed, m)
+			}
+		}
+		rep.Memories += len(changed)
+		if dryRun || len(changed) == 0 {
+			continue
+		}
+		if err := s.Write(ctx, func(tx *sql.Tx) error {
+			for _, m := range changed {
+				if _, err := tx.ExecContext(ctx, `UPDATE memories SET title = ?, body = ?, facts = ? WHERE id = ?`,
+					m.Title, m.Body, jsonList(m.Facts), m.ID); err != nil {
+					return err
+				}
+				if _, err := tx.ExecContext(ctx, `DELETE FROM memories_fts WHERE rowid = ?`, m.ID); err != nil {
+					return err
+				}
+				if _, err := tx.ExecContext(ctx, `INSERT INTO memories_fts(rowid, title, body) VALUES (?, ?, ?)`,
+					m.ID, stem.Text(m.Title), stem.Text(ftsBody(m))); err != nil {
+					return err
+				}
+			}
+			return nil
+		}); err != nil {
+			return rep, err
+		}
+	}
+	for _, t := range []struct {
+		table string
+		cols  []string
+		count *int
+	}{
+		{"summaries", []string{"request", "investigated", "learned", "completed", "next_steps", "notes"}, &rep.Summaries},
+		{"events", []string{"input", "output", "error"}, &rep.Events},
+		{"work_entries", []string{"fields"}, &rep.WorkEntries},
+	} {
+		n, err := s.scrubTable(ctx, t.table, t.cols, clean, dryRun)
+		if err != nil {
+			return rep, err
+		}
+		*t.count = n
+	}
+	return rep, nil
+}
+
+func (s *Store) scrubTable(ctx context.Context, table string, cols []string, clean func(string) string, dryRun bool) (int, error) {
+	sel := make([]string, len(cols))
+	for i, c := range cols {
+		sel[i] = "coalesce(" + c + ", '')"
+	}
+	total := 0
+	var last int64
+	for {
+		rows, err := s.db.QueryContext(ctx, `SELECT id, `+strings.Join(sel, ", ")+` FROM `+table+` WHERE id > ? ORDER BY id LIMIT 5000`, last)
+		if err != nil {
+			return total, err
+		}
+		type upd struct {
+			id   int64
+			vals []string
+		}
+		var batch []upd
+		n := 0
+		for rows.Next() {
+			vals := make([]string, len(cols))
+			dst := []any{&last}
+			for i := range vals {
+				dst = append(dst, &vals[i])
+			}
+			if err := rows.Scan(dst...); err != nil {
+				rows.Close()
+				return total, err
+			}
+			n++
+			diff := false
+			for i, v := range vals {
+				c := clean(v)
+				// Never turn a valid JSON value (work_entries.fields, tool input) into invalid JSON.
+				if c != v && (!json.Valid([]byte(v)) || json.Valid([]byte(c))) {
+					vals[i], diff = c, true
+				}
+			}
+			if diff {
+				batch = append(batch, upd{last, vals})
+			}
+		}
+		rows.Close()
+		if err := rows.Err(); err != nil {
+			return total, err
+		}
+		total += len(batch)
+		if n == 0 {
+			return total, nil
+		}
+		if dryRun || len(batch) == 0 {
+			continue
+		}
+		set := make([]string, len(cols))
+		for i, c := range cols {
+			set[i] = c + " = nullif(?, '')"
+		}
+		if err := s.Write(ctx, func(tx *sql.Tx) error {
+			for _, u := range batch {
+				args := make([]any, 0, len(cols)+1)
+				for _, v := range u.vals {
+					args = append(args, v)
+				}
+				args = append(args, u.id)
+				if _, err := tx.ExecContext(ctx, `UPDATE `+table+` SET `+strings.Join(set, ", ")+` WHERE id = ?`, args...); err != nil {
+					return err
+				}
+			}
+			return nil
+		}); err != nil {
+			return total, err
+		}
+	}
 }

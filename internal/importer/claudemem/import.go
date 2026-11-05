@@ -18,6 +18,7 @@ import (
 	"time"
 
 	"github.com/tazhate/agent-mem/internal/project"
+	"github.com/tazhate/agent-mem/internal/redact"
 	"github.com/tazhate/agent-mem/internal/store"
 )
 
@@ -33,6 +34,8 @@ type Options struct {
 	// SearchRoots are scanned for <root>/<name>/.git to place projects without a recorded cwd.
 	SearchRoots []string
 	Log         io.Writer
+	// Clean is applied to every imported text field (redaction + size limit), like live capture.
+	Clean func(string) string
 }
 
 type Report struct {
@@ -84,6 +87,9 @@ func Run(ctx context.Context, dst *store.Store, opt Options) (*Report, error) {
 	defer src.Close()
 	if err := src.PingContext(ctx); err != nil {
 		return nil, fmt.Errorf("open %s: %w", opt.Source, err)
+	}
+	if opt.Clean == nil {
+		opt.Clean = func(s string) string { return s }
 	}
 	im := &importer{
 		opt: opt, src: src, dst: dst, log: cmp.Or(opt.Log, io.Writer(io.Discard)),
@@ -402,10 +408,11 @@ func (im *importer) observations(ctx context.Context) error {
 func (im *importer) convert(ctx context.Context, tx *sql.Tx, r obsRow) error {
 	concepts := list(r.concepts)
 	typ, private := mapType(r.typ)
-	title := strings.TrimSpace(r.title)
-	body := strings.TrimSpace(r.narrative)
+	c := im.opt.Clean
+	title := strings.TrimSpace(c(r.title))
+	body := strings.TrimSpace(c(r.narrative))
 	if body == "" {
-		body = strings.TrimSpace(r.sub)
+		body = strings.TrimSpace(c(r.sub))
 	}
 	if title == "" {
 		title = firstLine(body, 100)
@@ -426,8 +433,8 @@ func (im *importer) convert(ctx context.Context, tx *sql.Tx, r obsRow) error {
 	}
 	files := slices.Compact(slices.Sorted(slices.Values(append(list(r.filesRead), list(r.filesMod)...))))
 	meta := map[string]string{"orig_type": r.typ}
-	if r.sub != "" && r.sub != body {
-		meta["subtitle"] = r.sub
+	if sub := c(r.sub); sub != "" && sub != body {
+		meta["subtitle"] = sub
 	}
 	if r.model != "" {
 		meta["model"] = r.model
@@ -440,7 +447,7 @@ func (im *importer) convert(ctx context.Context, tx *sql.Tx, r obsRow) error {
 	}
 	m := &store.Memory{
 		ProjectID: im.proj[base], SessionID: sess.ID, Type: typ, Title: title, Body: body,
-		Facts: list(r.facts), Files: files, Concepts: concepts, Private: private,
+		Facts: cleanList(list(r.facts), c), Files: files, Concepts: concepts, Private: private,
 		CreatedAt: r.created, Origin: origin, OriginID: fmt.Sprint(r.id), Meta: meta,
 	}
 	if tx == nil {
@@ -480,6 +487,9 @@ func (im *importer) summaries(ctx context.Context) error {
 			return err
 		}
 		su.Origin, su.OriginID = origin, fmt.Sprint(id)
+		for _, f := range []*string{&su.Request, &su.Investigated, &su.Learned, &su.Completed, &su.NextSteps, &su.Notes} {
+			*f = im.opt.Clean(*f)
+		}
 		all = append(all, su)
 		bases = append(bases, baseProject(p, merged))
 		memSess = append(memSess, ms)
@@ -552,8 +562,12 @@ func (im *importer) prompts(ctx context.Context) error {
 			if !ok {
 				continue
 			}
-			created, err := store.InsertReturning(ctx, tx, `INSERT INTO events(session_id, turn, kind, input, ts, processed, origin, origin_id)
-				VALUES (?, ?, 'prompt', ?, ?, 1, ?, ?) ON CONFLICT DO NOTHING`, s.ID, p.num, p.text, p.ts, origin+":prompt", fmt.Sprint(p.id))
+			var text, errMark any = im.opt.Clean(p.text), nil
+			if redact.IsFullyPrivate(p.text) {
+				text, errMark = nil, "private"
+			}
+			created, err := store.InsertReturning(ctx, tx, `INSERT INTO events(session_id, turn, kind, input, error, ts, processed, origin, origin_id)
+				VALUES (?, ?, 'prompt', ?, ?, ?, 1, ?, ?) ON CONFLICT DO NOTHING`, s.ID, p.num, text, errMark, p.ts, origin+":prompt", fmt.Sprint(p.id))
 			if err != nil {
 				return err
 			}
@@ -654,7 +668,7 @@ func (im *importer) raw(ctx context.Context) error {
 				}
 				created, err := store.InsertReturning(ctx, tx, `INSERT INTO events(session_id, turn, kind, tool, input, output, ts, processed, origin, origin_id)
 					VALUES (?, ?, 'tool_post', ?, ?, ?, ?, 1, ?, ?) ON CONFLICT DO NOTHING`,
-					s.ID, t.turn, t.tool, t.in, t.out, t.ts, origin+":tool", fmt.Sprint(t.id))
+					s.ID, t.turn, t.tool, im.opt.Clean(t.in), im.opt.Clean(t.out), t.ts, origin+":tool", fmt.Sprint(t.id))
 				if err != nil {
 					return err
 				}
@@ -699,4 +713,11 @@ func nullStr(s string) any {
 		return nil
 	}
 	return s
+}
+
+func cleanList(v []string, c func(string) string) []string {
+	for i := range v {
+		v[i] = c(v[i])
+	}
+	return v
 }

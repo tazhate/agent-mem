@@ -11,7 +11,9 @@ import (
 	"time"
 
 	"github.com/tazhate/agent-mem/internal/config"
+	"github.com/tazhate/agent-mem/internal/daemon"
 	"github.com/tazhate/agent-mem/internal/importer/claudemem"
+	"github.com/tazhate/agent-mem/internal/redact"
 	"github.com/tazhate/agent-mem/internal/store"
 )
 
@@ -61,6 +63,8 @@ func cmdImport(args []string) int {
 	if err != nil {
 		return fail("%v", err)
 	}
+	red := redact.New(cfg.Capture.RedactGeneric)
+	opt.Clean = func(v string) string { return daemon.CleanText(red, cfg.Capture.Redact, v, cfg.Capture.MaxFieldChars) }
 	st, err := store.Open(cfg.DBPath())
 	if err != nil {
 		return fail("%v", err)

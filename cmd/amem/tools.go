@@ -76,7 +76,7 @@ func cmdShow(args []string) int {
 		ids = append(ids, id)
 	}
 	var mems []*store.Memory
-	if err := daemon.CallData(loadCfg(), daemon.OpGet, daemon.GetParams{IDs: ids}, &mems); err != nil {
+	if err := daemon.CallData(loadCfg(), daemon.OpGet, daemon.GetParams{IDs: ids, IncludePrivate: true}, &mems); err != nil {
 		return fail("%v", err)
 	}
 	for _, m := range mems {

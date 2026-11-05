@@ -21,7 +21,8 @@ var schemaSQL string
 const schemaVersion = "1"
 
 type Store struct {
-	db *sql.DB
+	db   *sql.DB
+	path string
 	// wmu serializes writers; SQLite allows one writer anyway and this avoids busy retries.
 	wmu sync.Mutex
 }
@@ -35,12 +36,15 @@ func Open(path string) (*Store, error) {
 	for _, p := range []string{"busy_timeout(10000)", "journal_mode(WAL)", "synchronous(NORMAL)", "foreign_keys(OFF)", "temp_store(MEMORY)", "cache_size(-65536)", "mmap_size(2147483648)"} {
 		q.Add("_pragma", p)
 	}
+	// IMMEDIATE: a deferred transaction that reads first and writes later cannot wait on
+	// busy_timeout when another process (watch, import) holds the write lock.
+	q.Set("_txlock", "immediate")
 	db, err := sql.Open("sqlite", "file:"+path+"?"+q.Encode())
 	if err != nil {
 		return nil, err
 	}
 	db.SetMaxOpenConns(8)
-	s := &Store{db: db}
+	s := &Store{db: db, path: path}
 	if err := s.migrate(context.Background()); err != nil {
 		db.Close()
 		return nil, err
@@ -61,8 +65,44 @@ func (s *Store) migrate(ctx context.Context) error {
 	if _, err := s.db.ExecContext(ctx, schemaSQL); err != nil {
 		return fmt.Errorf("apply schema: %w", err)
 	}
+	// Columns added after the first release; CREATE TABLE IF NOT EXISTS does not add them.
+	for _, c := range []struct{ table, column, decl string }{
+		{"sessions", "private_turn", "INTEGER NOT NULL DEFAULT -1"},
+		{"watch_state", "session", "TEXT NOT NULL DEFAULT ''"},
+		{"watch_state", "cwd", "TEXT NOT NULL DEFAULT ''"},
+		{"watch_state", "subagent", "INTEGER NOT NULL DEFAULT 0"},
+	} {
+		if err := s.ensureColumn(ctx, c.table, c.column, c.decl); err != nil {
+			return err
+		}
+	}
+	for _, f := range []string{"", "-wal", "-shm"} {
+		_ = os.Chmod(s.path+f, 0o600)
+	}
 	_, err := s.db.ExecContext(ctx, `INSERT INTO meta(key, value) VALUES ('schema_version', ?)
 		ON CONFLICT(key) DO NOTHING`, schemaVersion)
+	return err
+}
+
+func (s *Store) ensureColumn(ctx context.Context, table, column, decl string) error {
+	rows, err := s.db.QueryContext(ctx, `SELECT name FROM pragma_table_info(?)`, table)
+	if err != nil {
+		return err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var name string
+		if err := rows.Scan(&name); err != nil {
+			return err
+		}
+		if name == column {
+			return nil
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return err
+	}
+	_, err = s.db.ExecContext(ctx, `ALTER TABLE `+table+` ADD COLUMN `+column+` `+decl)
 	return err
 }
 

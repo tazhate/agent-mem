@@ -25,6 +25,9 @@ type Adapter interface {
 	Parse(hookArg string, raw []byte, env Env) (*event.Event, error)
 	// Render returns what the hook prints to stdout; nil means print nothing.
 	Render(ev *event.Event, hookArg string, context string) []byte
+	// CanInject reports whether this hook can deliver context to the model at all. Recall is
+	// skipped otherwise, so nothing is marked as shown when the runtime would drop it.
+	CanInject(ev *event.Event, hookArg string) bool
 }
 
 var registry = map[string]Adapter{}

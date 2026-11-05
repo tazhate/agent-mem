@@ -64,3 +64,7 @@ func (cursor) Render(ev *event.Event, hookArg string, context string) []byte {
 	b, _ := json.Marshal(map[string]string{"additional_context": truncateContext(context)})
 	return b
 }
+
+func (cursor) CanInject(ev *event.Event, hookArg string) bool {
+	return cursorContextEvents[firstNonEmpty(hookArg, hookNameFor(cursorKinds, ev.Kind))]
+}

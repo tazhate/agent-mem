@@ -118,3 +118,21 @@ func TestKimi(t *testing.T) {
 		t.Fatal("kimi render")
 	}
 }
+
+func TestCanInject(t *testing.T) {
+	cu, _ := Get("cursor")
+	if cu.CanInject(&event.Event{Kind: event.Prompt}, "beforeSubmitPrompt") {
+		t.Fatal("cursor beforeSubmitPrompt cannot carry context")
+	}
+	if !cu.CanInject(&event.Event{Kind: event.SessionStart}, "sessionStart") {
+		t.Fatal("cursor sessionStart can")
+	}
+	k, _ := Get("kimi")
+	if k.CanInject(&event.Event{Kind: event.SessionStart}, "SessionStart") {
+		t.Fatal("kimi ignores SessionStart output")
+	}
+	cc, _ := Get("claude-code")
+	if cc.CanInject(&event.Event{Kind: event.TurnEnd}, "Stop") || !cc.CanInject(&event.Event{Kind: event.Prompt}, "UserPromptSubmit") {
+		t.Fatal("claude-code capability")
+	}
+}

@@ -30,7 +30,8 @@ CREATE TABLE IF NOT EXISTS sessions (
 	last_event_at INTEGER NOT NULL,
 	ended_at      INTEGER,
 	summarized_at INTEGER,
-	origin        TEXT
+	origin        TEXT,
+	private_turn  INTEGER NOT NULL DEFAULT -1   -- turn whose prompt was fully <private>
 );
 CREATE INDEX IF NOT EXISTS sessions_project ON sessions(project_id, last_event_at);
 

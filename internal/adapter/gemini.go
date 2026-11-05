@@ -42,3 +42,7 @@ func (gemini) Render(ev *event.Event, hookArg string, context string) []byte {
 	}
 	return hookSpecific(name, context)
 }
+
+func (gemini) CanInject(ev *event.Event, hookArg string) bool {
+	return geminiContextEvents[firstNonEmpty(hookArg, hookNameFor(geminiKinds, ev.Kind))]
+}

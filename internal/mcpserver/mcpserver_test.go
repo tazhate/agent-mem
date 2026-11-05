@@ -1,6 +1,8 @@
 package mcpserver
 
 import (
+	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
 
@@ -48,5 +50,23 @@ func TestTools(t *testing.T) {
 	res, err = cs.CallTool(ctx, &mcp.CallToolParams{Name: "memory_save", Arguments: map[string]any{"text": "remember this"}})
 	if err != nil || saved["text"] != "remember this" || !strings.Contains(res.Content[0].(*mcp.TextContent).Text, "#7") {
 		t.Fatalf("save: %v %+v %v", err, res, saved)
+	}
+}
+
+func TestHTTPRequiresToken(t *testing.T) {
+	h := HTTPHandler(func(string, any, any) error { return nil }, "secret-token-0123456789abcdef0123456789")
+	for _, auth := range []string{"", "Bearer wrong"} {
+		req := httptest.NewRequest(http.MethodPost, "/", strings.NewReader(`{}`))
+		if auth != "" {
+			req.Header.Set("Authorization", auth)
+		}
+		rec := httptest.NewRecorder()
+		h.ServeHTTP(rec, req)
+		if rec.Code != http.StatusUnauthorized {
+			t.Fatalf("auth %q: status %d", auth, rec.Code)
+		}
+	}
+	if CheckLoopback("0.0.0.0:37800") == nil || CheckLoopback("127.0.0.1:37800") != nil || CheckLoopback("[::1]:1") != nil {
+		t.Fatal("loopback check")
 	}
 }

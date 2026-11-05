@@ -94,3 +94,7 @@ func firstOf(s []string) string {
 	}
 	return ""
 }
+
+func (claudeCode) CanInject(ev *event.Event, hookArg string) bool {
+	return claudeContextEvents[firstNonEmpty(hookArg, hookNameFor(claudeKinds, ev.Kind))]
+}

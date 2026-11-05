@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/tazhate/agent-mem/internal/event"
+	"github.com/tazhate/agent-mem/internal/redact"
 	"github.com/tazhate/agent-mem/internal/store"
 )
 
@@ -76,7 +77,11 @@ func (s *Server) api(ctx context.Context, op string, raw json.RawMessage) (any, 
 		if len(p.IDs) > 50 {
 			p.IDs = p.IDs[:50]
 		}
-		mems, err := s.st.GetMemories(ctx, p.IDs)
+		get := s.st.GetMemories
+		if p.IncludePrivate {
+			get = s.st.GetMemoriesAll
+		}
+		mems, err := get(ctx, p.IDs)
 		if err != nil {
 			return nil, err
 		}
@@ -98,7 +103,10 @@ func (s *Server) api(ctx context.Context, op string, raw json.RawMessage) (any, 
 		if strings.TrimSpace(p.Text) == "" {
 			return nil, errors.New("text is required")
 		}
-		m := &store.Memory{Type: p.Type, Title: p.Title, Body: s.red.Clean(p.Text), Files: p.Files, Origin: "manual"}
+		if redact.IsFullyPrivate(p.Text) {
+			return nil, errors.New("text is entirely <private>; nothing to save")
+		}
+		m := &store.Memory{Type: p.Type, Title: s.red.Clean(p.Title), Body: s.red.Clean(p.Text), Files: p.Files, Origin: "manual"}
 		if !store.ValidType(m.Type) {
 			m.Type = "discovery"
 			if p.Global {
@@ -134,7 +142,13 @@ func (s *Server) api(ctx context.Context, op string, raw json.RawMessage) (any, 
 		if err != nil {
 			return nil, err
 		}
-		if err := s.st.AppendWork(ctx, id, p.List, p.Fields); err != nil {
+		// Work state comes straight from MCP, so it gets the same cleaning as captured text.
+		for k, v := range p.Fields {
+			if str, ok := v.(string); ok {
+				p.Fields[k] = s.red.Clean(str)
+			}
+		}
+		if err := s.st.AppendWork(ctx, id, s.red.Clean(p.List), p.Fields); err != nil {
 			return nil, err
 		}
 		return s.st.WorkLists(ctx, id, p.List, false)

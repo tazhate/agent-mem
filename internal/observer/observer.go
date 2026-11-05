@@ -140,13 +140,27 @@ func (o *Observer) process(ctx context.Context, sid string, force bool) {
 		return
 	}
 	batch := evs[:cut]
-	ids := make([]int64, len(batch))
-	for i, e := range batch {
-		ids[i] = e.ID
+	idsByTurn := map[int][]int64{}
+	for _, e := range batch {
+		idsByTurn[e.Turn] = append(idsByTurn[e.Turn], e.ID)
 	}
 	turns := buildTurns(batch)
+	kept := map[int]bool{}
+	for _, t := range turns {
+		kept[t.n] = true
+	}
+	// Turns with nothing worth sending (noise, private) are done right away.
+	var dropped []int64
+	for n, ids := range idsByTurn {
+		if !kept[n] {
+			dropped = append(dropped, ids...)
+		}
+	}
+	if err := o.st.MarkProcessed(ctx, dropped); err != nil {
+		o.log.Warn("mark processed", "err", err)
+		return
+	}
 	if len(turns) == 0 {
-		_ = o.st.MarkProcessed(ctx, ids)
 		return
 	}
 	sess, err := o.st.GetSession(ctx, sid)
@@ -166,12 +180,19 @@ func (o *Observer) process(ctx context.Context, sid string, force bool) {
 			o.log.Warn("observer failed; will retry", "session", sid, "retry_in", wait, "err", err)
 			return
 		}
+		// Mark each chunk as soon as it is stored: a later failure must not resend it and
+		// produce differently worded duplicates.
+		var done []int64
+		for _, t := range chunk {
+			done = append(done, idsByTurn[t.n]...)
+		}
+		if err := o.st.MarkProcessed(ctx, done); err != nil {
+			o.log.Warn("mark processed", "err", err)
+			return
+		}
 	}
 	delete(o.fails, sid)
 	delete(o.backoff, sid)
-	if err := o.st.MarkProcessed(ctx, ids); err != nil {
-		o.log.Warn("mark processed", "err", err)
-	}
 }
 
 func (o *Observer) observe(ctx context.Context, prov provider.Provider, sess store.Session, turns []turn) error {

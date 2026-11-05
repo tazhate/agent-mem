@@ -2,6 +2,7 @@ package daemon
 
 import (
 	"bufio"
+	"bytes"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -24,11 +25,13 @@ func Call(cfg *config.Config, req *Request, timeout time.Duration) (*Response, e
 	}
 	defer conn.Close()
 	_ = conn.SetDeadline(deadline)
-	b, err := json.Marshal(req)
-	if err != nil {
+	var buf bytes.Buffer
+	enc := json.NewEncoder(&buf)
+	enc.SetEscapeHTML(false) // keep <private> literal so the daemon can strip it
+	if err := enc.Encode(req); err != nil {
 		return nil, err
 	}
-	if _, err := conn.Write(append(b, '\n')); err != nil {
+	if _, err := conn.Write(buf.Bytes()); err != nil {
 		return nil, err
 	}
 	line, err := bufio.NewReaderSize(conn, 64<<10).ReadBytes('\n')

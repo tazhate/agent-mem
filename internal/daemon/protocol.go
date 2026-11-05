@@ -90,6 +90,8 @@ type SearchParams struct {
 type GetParams struct {
 	IDs     []int64 `json:"ids"`
 	Session string  `json:"session,omitempty"`
+	// IncludePrivate is for the local CLI (`amem show`); MCP tools never set it.
+	IncludePrivate bool `json:"include_private,omitempty"`
 }
 
 type TimelineParams struct {
