@@ -2,7 +2,6 @@ package daemon
 
 import (
 	"bufio"
-	"bytes"
 	"context"
 	"database/sql"
 	"encoding/json"
@@ -495,42 +494,9 @@ func CleanText(r *redact.Redactor, doRedact bool, v string, limit int) string {
 	return redact.StripTags(v)
 }
 
-// CleanJSON applies fix to every string inside a JSON value. Strings are decoded first, so
-// escaped forms like \u003cprivate\u003e are seen as <private>; output keeps < and > literal.
+// CleanJSON applies fix to every string inside a JSON value (see redact.CleanJSON).
 func CleanJSON(raw json.RawMessage, fix func(string) string) json.RawMessage {
-	if len(raw) == 0 {
-		return raw
-	}
-	var v any
-	dec := json.NewDecoder(bytes.NewReader(raw))
-	dec.UseNumber()
-	if err := dec.Decode(&v); err != nil {
-		b, _ := json.Marshal(fix(string(raw)))
-		return b
-	}
-	var walk func(any) any
-	walk = func(x any) any {
-		switch t := x.(type) {
-		case string:
-			return fix(t)
-		case map[string]any:
-			for k, val := range t {
-				t[k] = walk(val)
-			}
-		case []any:
-			for i, val := range t {
-				t[i] = walk(val)
-			}
-		}
-		return x
-	}
-	var out bytes.Buffer
-	enc := json.NewEncoder(&out)
-	enc.SetEscapeHTML(false)
-	if err := enc.Encode(walk(v)); err != nil {
-		return raw
-	}
-	return bytes.TrimRight(out.Bytes(), "\n")
+	return redact.CleanJSON(raw, fix)
 }
 
 var citeRe = regexp.MustCompile(`#(\d{1,9})\b`)

@@ -2,11 +2,13 @@ package store
 
 import (
 	"database/sql"
+	"encoding/json"
 	"path/filepath"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/tazhate/agent-mem/internal/redact"
 	"github.com/tazhate/agent-mem/internal/stem"
 )
 
@@ -165,5 +167,26 @@ func TestScrub(t *testing.T) {
 	}
 	if hits, _ := s.SearchFTS(ctx, []string{"redact"}, Scope{ProjectID: pid}, 5); len(hits) != 1 {
 		t.Fatal("FTS not reindexed after scrub")
+	}
+}
+
+func TestScrubJSONField(t *testing.T) {
+	s := open(t)
+	ctx := t.Context()
+	// A key without END used to swallow the rest of the JSON, the edit was rejected as invalid
+	// JSON and the other secret in the same field stayed.
+	in := `{"command":"cat id_rsa","files":["-----BEGIN OPENSSH PRIVATE KEY-----\nb3BlbnNz","token glpat-` + `abcdefghij1234567890"]}`
+	s.Write(ctx, func(tx *sql.Tx) error {
+		s.InsertEvent(ctx, tx, EventRow{SessionID: "x", Kind: "tool_post", Tool: "Bash", Input: in, TS: 1})
+		return nil
+	})
+	r := redact.New(true)
+	if _, err := s.Scrub(ctx, r.Clean, false); err != nil {
+		t.Fatal(err)
+	}
+	var got string
+	s.DB().QueryRow(`SELECT input FROM events`).Scan(&got)
+	if !json.Valid([]byte(got)) || strings.Contains(got, "b3BlbnNz") || strings.Contains(got, "glpat-abc") || !strings.Contains(got, "cat id_rsa") {
+		t.Fatalf("scrubbed JSON: %s", got)
 	}
 }

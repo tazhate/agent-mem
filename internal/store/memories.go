@@ -12,6 +12,7 @@ import (
 	"time"
 	"unicode"
 
+	"github.com/tazhate/agent-mem/internal/redact"
 	"github.com/tazhate/agent-mem/internal/stem"
 )
 
@@ -616,9 +617,18 @@ func (s *Store) scrubTable(ctx context.Context, table string, cols []string, nul
 			n++
 			diff := false
 			for i, v := range vals {
-				c := clean(v)
-				// Never turn a valid JSON value (work_entries.fields, tool input) into invalid JSON.
-				if c != v && (!json.Valid([]byte(v)) || json.Valid([]byte(c))) {
+				// JSON values (tool input, work_entries.fields) are cleaned string by string, like
+				// live capture does; plain text is cleaned as a whole.
+				var c string
+				if t := strings.TrimSpace(v); (strings.HasPrefix(t, "{") || strings.HasPrefix(t, "[")) && json.Valid([]byte(t)) {
+					c = string(redact.CleanJSON([]byte(v), clean))
+					if c == string(redact.CleanJSON([]byte(v), func(x string) string { return x })) {
+						c = v // nothing to redact: keep the original bytes and formatting
+					}
+				} else {
+					c = clean(v)
+				}
+				if c != v {
 					vals[i], diff = c, true
 				}
 			}

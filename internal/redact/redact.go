@@ -2,6 +2,8 @@
 package redact
 
 import (
+	"bytes"
+	"encoding/json"
 	"regexp"
 	"strings"
 )
@@ -157,4 +159,45 @@ func hasDigit(s string) bool {
 		}
 	}
 	return false
+}
+
+// CleanJSON applies fix to every string inside a JSON value. Strings are decoded first, so
+// escaped forms like \u003cprivate\u003e are seen as <private>, and a rule that runs to the
+// end of its text (a private key without END) stops at the end of that string instead of
+// eating the rest of the document. Output keeps < and > literal. Invalid JSON is cleaned as
+// plain text and re-encoded as a JSON string.
+func CleanJSON(raw []byte, fix func(string) string) []byte {
+	if len(raw) == 0 {
+		return raw
+	}
+	var v any
+	dec := json.NewDecoder(bytes.NewReader(raw))
+	dec.UseNumber()
+	if err := dec.Decode(&v); err != nil {
+		b, _ := json.Marshal(fix(string(raw)))
+		return b
+	}
+	var walk func(any) any
+	walk = func(x any) any {
+		switch t := x.(type) {
+		case string:
+			return fix(t)
+		case map[string]any:
+			for k, val := range t {
+				t[k] = walk(val)
+			}
+		case []any:
+			for i, val := range t {
+				t[i] = walk(val)
+			}
+		}
+		return x
+	}
+	var out bytes.Buffer
+	enc := json.NewEncoder(&out)
+	enc.SetEscapeHTML(false)
+	if err := enc.Encode(walk(v)); err != nil {
+		return raw
+	}
+	return bytes.TrimRight(out.Bytes(), "\n")
 }
