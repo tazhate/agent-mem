@@ -64,3 +64,11 @@ func TestNoFalsePositive(t *testing.T) {
 		}
 	}
 }
+
+func BenchmarkCleanTypical(b *testing.B) {
+	r := New(true)
+	text := strings.Repeat("The daemon drains the spool every second and stores events in SQLite WAL mode. ", 20)
+	for b.Loop() {
+		r.Clean(text)
+	}
+}
