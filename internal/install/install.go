@@ -530,7 +530,12 @@ func markedBlock(path, tomlBegin, tomlEnd, conflict, block string, uninstall boo
 			if end < len(after) && after[end] == '\n' {
 				end++
 			}
-			after = after[:i] + after[end:]
+			// Drop the blank separator line in front of the block too, so install, reinstall and
+			// uninstall do not pile up empty lines.
+			after = strings.TrimRight(after[:i], "\n") + "\n" + after[end:]
+			if strings.TrimSpace(after) == "" {
+				after = ""
+			}
 		}
 	}
 	if !uninstall {

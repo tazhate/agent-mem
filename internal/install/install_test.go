@@ -82,8 +82,13 @@ func TestCodexTomlBlock(t *testing.T) {
 	if !strings.Contains(string(hooks), "hook codex SessionStart") {
 		t.Fatalf("codex hooks:\n%s", hooks)
 	}
-	Run(o, "codex", false) // reinstall must not duplicate the block
+	first := string(toml)
+	Run(o, "codex", false) // reinstall must not duplicate the block or add blank lines
+	Run(o, "codex", false)
 	toml, _ = os.ReadFile(filepath.Join(o.Home, ".codex", "config.toml"))
+	if string(toml) != first {
+		t.Fatalf("reinstall changed the file:\n%q\nvs\n%q", toml, first)
+	}
 	if strings.Count(string(toml), "[mcp_servers.amem]") != 1 {
 		t.Fatalf("duplicated block:\n%s", toml)
 	}
