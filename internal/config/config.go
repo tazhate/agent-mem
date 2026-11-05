@@ -68,6 +68,9 @@ type RecallConfig struct {
 	MinPromptChars      int     `toml:"min_prompt_chars"`
 	MinScore            float64 `toml:"min_score"`
 	GlobalPreferences   bool    `toml:"global_preferences"`
+	// VectorFloor is the cosine similarity that maps to zero relevance; it depends on the
+	// embedding model (unrelated texts sit around 0.2-0.4 for paraphrase-multilingual).
+	VectorFloor float64 `toml:"vector_floor"`
 }
 
 type ObserverConfig struct {
@@ -125,6 +128,7 @@ func Default() *Config {
 			MinPromptChars:      15,
 			MinScore:            0.25,
 			GlobalPreferences:   true,
+			VectorFloor:         0.40,
 		},
 		Observer: ObserverConfig{
 			Enabled:     true,

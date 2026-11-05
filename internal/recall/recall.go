@@ -224,7 +224,8 @@ func (e *Engine) Search(ctx context.Context, text string, scope store.Scope, lim
 			rel *= 0.4
 		}
 		if sim, ok := vecSim[m.ID]; ok {
-			rel = max(rel, clamp01((float64(sim)-0.45)*2))
+			floor := cmp.Or(e.cfg.VectorFloor, 0.40)
+			rel = max(rel, clamp01((float64(sim)-floor)/(1-floor)*1.5))
 		}
 		out = append(out, Scored{Mem: m, Rel: rel, Score: rel * typeWeight(m.Type) * recency(m) * usage(m)})
 	}
