@@ -14,6 +14,7 @@ import (
 
 	"github.com/tazhate/agent-mem/internal/config"
 	"github.com/tazhate/agent-mem/internal/event"
+	"github.com/tazhate/agent-mem/internal/redact"
 	"github.com/tazhate/agent-mem/internal/store"
 )
 
@@ -267,12 +268,65 @@ func TestRestartOnlyForOwnBinary(t *testing.T) {
 	}
 }
 
+func TestDaemonEnvKeepsReferencedSecrets(t *testing.T) {
+	t.Setenv("ANTHROPIC_AUTH_TOKEN", "tok-referenced")
+	cfg := config.Default()
+	cfg.Observer.Providers = []config.ProviderConfig{{Kind: "anthropic", Key: "env:ANTHROPIC_AUTH_TOKEN"}}
+	if !strings.Contains(strings.Join(DaemonEnv(cfg), "\n"), "tok-referenced") {
+		t.Fatal("a variable named by an env: reference was dropped")
+	}
+}
+
 func TestDaemonEnvDropsSessionRedirects(t *testing.T) {
 	t.Setenv("ANTHROPIC_BASE_URL", "https://api.z.ai/api/anthropic")
 	t.Setenv("ANTHROPIC_DEFAULT_HAIKU_MODEL", "glm-5.3-flash")
 	t.Setenv("ANTHROPIC_API_KEY", "kept-for-env-refs")
-	env := strings.Join(DaemonEnv(), "\n")
+	env := strings.Join(DaemonEnv(nil), "\n")
 	if strings.Contains(env, "z.ai") || strings.Contains(env, "glm-5.3") || !strings.Contains(env, "AMEM_DISABLE=1") || !strings.Contains(env, "kept-for-env-refs") {
 		t.Fatalf("daemon env:\n%s", env)
+	}
+}
+
+func TestSpooledPrivatePromptStaysPrivate(t *testing.T) {
+	s, repo := newServer(t, "on")
+	ctx := t.Context()
+	cfg := config.Default()
+	prompt := &event.Event{Runtime: "claude-code", NativeSession: "sp", Cwd: repo, Kind: event.Prompt, ID: event.NewID(), Prompt: "<private>secret plan</private>", TS: 1000}
+	Sanitize(cfg, prompt) // what the hook does before writing the spool
+	ingestCommit(s, ctx, prompt, false)
+	tool := &event.Tool{Name: "Bash", Input: json.RawMessage(`{"command":"cat plan"}`), Output: "plan-content"}
+	ingestCommit(s, ctx, &event.Event{Runtime: "claude-code", NativeSession: "sp", Cwd: repo, Kind: event.ToolPost, ID: event.NewID(), Tool: tool, TS: 2000}, false)
+	// A late public prompt from before (TS 500) must not end the private turn.
+	ingestCommit(s, ctx, &event.Event{Runtime: "claude-code", NativeSession: "sp", Cwd: repo, Kind: event.Prompt, ID: event.NewID(), Prompt: "earlier public question", TS: 500}, false)
+	tool2 := &event.Tool{Name: "Bash", Input: json.RawMessage(`{"command":"cat plan2"}`), Output: "plan-content-2"}
+	ingestCommit(s, ctx, &event.Event{Runtime: "claude-code", NativeSession: "sp", Cwd: repo, Kind: event.ToolPost, ID: event.NewID(), Tool: tool2, TS: 3000}, false)
+	var dump string
+	s.st.DB().QueryRow(`SELECT group_concat(coalesce(input,'') || coalesce(output,''), '|') FROM events`).Scan(&dump)
+	if strings.Contains(dump, "plan-content") || strings.Contains(dump, "secret plan") {
+		t.Fatalf("private turn leaked after spool replay: %s", dump)
+	}
+}
+
+func TestPrivateBlockSurvivesElision(t *testing.T) {
+	r := redact.New(true)
+	text := strings.Repeat("public ", 3000) + "<private>" + strings.Repeat("confidential ", 2000) + "</private> tail"
+	out := CleanText(r, true, text, 16000)
+	if strings.Contains(out, "confidential") {
+		t.Fatal("private content survived elision")
+	}
+}
+
+func TestNestedWorkFieldsRedacted(t *testing.T) {
+	s, repo := newServer(t, "on")
+	var lists []store.WorkList
+	err := s.CallLocal(t.Context(), OpWorkW, WorkParams{List: "ops", Cwd: repo,
+		Fields: map[string]any{"task": "x", "details": map[string]any{"note": "password=hunter2hunter2", "items": []any{"token: abcdefgh12345"}}}}, &lists)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var raw string
+	s.st.DB().QueryRow(`SELECT fields FROM work_entries`).Scan(&raw)
+	if strings.Contains(raw, "hunter2") || strings.Contains(raw, "abcdefgh12345") {
+		t.Fatalf("nested work fields: %s", raw)
 	}
 }

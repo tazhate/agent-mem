@@ -172,3 +172,31 @@ func TestSummaryGivesUp(t *testing.T) {
 		t.Fatalf("summary attempts = %d, want %d then stop", b.calls, maxFailures)
 	}
 }
+
+func TestEmptyObjectIsNotAnAnswer(t *testing.T) {
+	ctx := t.Context()
+	st, _ := store.Open(filepath.Join(t.TempDir(), "t.db"))
+	defer st.Close()
+	pid, _ := st.EnsureProject(ctx, "/r/.git", "r", "/r")
+	sid := "claude-code:e"
+	now := time.Now().UnixMilli()
+	st.Write(ctx, func(tx *sql.Tx) error {
+		st.TouchSession(ctx, tx, sid, "claude-code", "e", pid, "/r", "", true, now)
+		st.InsertEvent(ctx, tx, store.EventRow{SessionID: sid, Turn: 1, Kind: "prompt", Input: "q", TS: now})
+		st.InsertEvent(ctx, tx, store.EventRow{SessionID: sid, Turn: 1, Kind: "tool_post", Tool: "Bash", Input: `{"command":"make"}`, Output: "ok", TS: now})
+		st.InsertEvent(ctx, tx, store.EventRow{SessionID: sid, Turn: 1, Kind: "turn_end", Output: "done", TS: now})
+		return nil
+	})
+	o := New(st, config.Default().Observer, recall.New(st, config.Default().Recall, nil), slog.New(slog.NewTextHandler(io.Discard, nil)))
+	o.SetProvider(&fake{resp: `{}`})
+	o.process(ctx, sid, false)
+	if p, _ := st.PendingEvents(ctx, sid, 10); len(p) != 3 {
+		t.Fatalf("{} acknowledged the batch: %d pending", len(p))
+	}
+	// Outages never give up.
+	for range 10 {
+		if o.fail("k", &provider.Error{Retryable: true, Err: context.DeadlineExceeded}) {
+			t.Fatal("gave up on a retryable outage")
+		}
+	}
+}

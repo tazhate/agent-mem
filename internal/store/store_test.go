@@ -190,3 +190,31 @@ func TestScrubJSONField(t *testing.T) {
 		t.Fatalf("scrubbed JSON: %s", got)
 	}
 }
+
+func TestScrubRebuildsStemDF(t *testing.T) {
+	s := open(t)
+	ctx := t.Context()
+	pid, _ := s.EnsureProject(ctx, "k", "n", "")
+	s.InsertMemory(ctx, &Memory{ProjectID: pid, Type: "gotcha", Title: "db password zqxsecretword"})
+	var n int
+	s.DB().QueryRow(`SELECT count(*) FROM stem_df WHERE term LIKE 'zqxsecret%'`).Scan(&n)
+	if n == 0 {
+		t.Fatal("precondition: stem indexed")
+	}
+	s.Scrub(ctx, func(v string) string { return strings.ReplaceAll(v, "zqxsecretword", "[REDACTED]") }, false)
+	s.DB().QueryRow(`SELECT count(*) FROM stem_df WHERE term LIKE 'zqxsecret%'`).Scan(&n)
+	if n != 0 {
+		t.Fatal("secret stem still in stem_df after scrub")
+	}
+}
+
+func TestClosedListHidesOpenTasks(t *testing.T) {
+	s := open(t)
+	ctx := t.Context()
+	pid, _ := s.EnsureProject(ctx, "k", "n", "")
+	s.AppendWork(ctx, pid, "release", map[string]any{"task": "tag", "status": "todo"})
+	s.AppendWork(ctx, pid, "release", map[string]any{"status": "dropped"})
+	if lists, _ := s.WorkLists(ctx, pid, "", false); len(lists) != 0 {
+		t.Fatalf("dropped list still shown: %+v", lists)
+	}
+}

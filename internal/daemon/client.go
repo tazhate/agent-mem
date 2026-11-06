@@ -16,6 +16,8 @@ import (
 	"time"
 
 	"github.com/tazhate/agent-mem/internal/config"
+	"github.com/tazhate/agent-mem/internal/event"
+	"github.com/tazhate/agent-mem/internal/redact"
 )
 
 // Call sends one request and waits for the answer within timeout.
@@ -101,7 +103,7 @@ func Spawn(cfg *config.Config) error {
 	cmd.Dir = "/" // do not pin whatever directory the first hook ran in
 	cmd.Stdout, cmd.Stderr = logf, logf
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setsid: true}
-	cmd.Env = DaemonEnv() // children of the daemon (CLI observers) must not re-enter hooks
+	cmd.Env = DaemonEnv(cfg) // children of the daemon (CLI observers) must not re-enter hooks
 	if err := cmd.Start(); err != nil {
 		return err
 	}
@@ -127,7 +129,7 @@ func StartAndWait(cfg *config.Config, timeout time.Duration) error {
 	cmd.Dir = "/"
 	cmd.Stdout, cmd.Stderr = logf, logf
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setsid: true}
-	cmd.Env = DaemonEnv()
+	cmd.Env = DaemonEnv(cfg)
 	if err := cmd.Start(); err != nil {
 		return err
 	}
@@ -183,8 +185,9 @@ func cmpOr(a, b string) string {
 	return b
 }
 
-// sessionVars redirect one agent session to another backend or model (claude-zai sets
-// ANTHROPIC_BASE_URL to z.ai and maps haiku to a GLM model). The daemon outlives the session
+// sessionVars redirect one agent session to another backend or model (a wrapper that points
+// Claude Code at another Anthropic-compatible API sets ANTHROPIC_BASE_URL and maps model
+// names). The daemon outlives the session
 // that happened to start it, so it must not inherit them.
 var sessionVars = []string{
 	"ANTHROPIC_BASE_URL", "ANTHROPIC_AUTH_TOKEN", "ANTHROPIC_MODEL", "ANTHROPIC_SMALL_FAST_MODEL",
@@ -192,10 +195,30 @@ var sessionVars = []string{
 	"API_TIMEOUT_MS", "CLAUDECODE", "CLAUDE_CODE_ENTRYPOINT", "CLAUDE_CODE_SSE_PORT",
 }
 
-// DaemonEnv is the environment for a spawned daemon: the caller's, minus session redirects,
-// plus AMEM_DISABLE so CLI observers it runs do not trigger amem hooks.
-func DaemonEnv() []string {
-	return append(WithoutVars(os.Environ(), sessionVars), "AMEM_DISABLE=1")
+// DaemonEnv is the environment for a spawned daemon: the caller's, minus session redirects
+// (except variables the config names as env: secret references), plus AMEM_DISABLE so CLI
+// observers it runs do not trigger amem hooks.
+func DaemonEnv(cfg *config.Config) []string {
+	drop := slices.DeleteFunc(slices.Clone(sessionVars), func(v string) bool { return slices.Contains(envRefs(cfg), v) })
+	return append(WithoutVars(os.Environ(), drop), "AMEM_DISABLE=1")
+}
+
+// envRefs lists the variables named by env: references in the config.
+func envRefs(cfg *config.Config) []string {
+	if cfg == nil {
+		return nil
+	}
+	var out []string
+	add := func(ref string) {
+		if name, ok := strings.CutPrefix(ref, "env:"); ok {
+			out = append(out, name)
+		}
+	}
+	for _, p := range cfg.Observer.Providers {
+		add(p.Key)
+	}
+	add(cfg.Embed.Key)
+	return out
 }
 
 // WithoutVars filters NAME=value entries.
@@ -208,4 +231,25 @@ func WithoutVars(env []string, names []string) []string {
 		}
 	}
 	return out
+}
+
+// PrivateMarker replaces a fully private prompt before it is spooled; the daemon recognizes
+// it as a private turn when the event is replayed.
+const PrivateMarker = "<private></private>"
+
+// Sanitize applies capture cleaning before an event touches the disk spool, so secrets and
+// <private> blocks never sit on disk in clear text.
+func Sanitize(cfg *config.Config, ev *event.Event) {
+	r := redact.New(cfg.Capture.RedactGeneric)
+	fix := func(v string) string { return CleanText(r, cfg.Capture.Redact, v, cfg.Capture.MaxFieldChars) }
+	if redact.IsFullyPrivate(ev.Prompt) {
+		ev.Prompt = PrivateMarker
+	} else {
+		ev.Prompt = fix(ev.Prompt)
+	}
+	ev.LastAssistant = fix(ev.LastAssistant)
+	if t := ev.Tool; t != nil {
+		t.Output, t.Error = fix(t.Output), fix(t.Error)
+		t.Input = CleanJSON(t.Input, fix)
+	}
 }

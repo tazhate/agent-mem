@@ -365,7 +365,8 @@ func (s *Store) WorkLists(ctx context.Context, projectID int64, list string, inc
 			}
 			wl.Items = append(wl.Items, WorkItem{Task: t, Fields: f})
 		}
-		wl.Open = !closed(a.state) || openTasks > 0
+		// Closing the list itself hides it with whatever tasks were left open.
+		wl.Open = !closed(a.state) && (openTasks > 0 || len(a.state) > 0)
 		if !wl.Open && !includeClosed {
 			continue
 		}

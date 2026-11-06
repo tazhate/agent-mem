@@ -43,11 +43,14 @@ func cmdWatch(args []string) int {
 	home, _ := os.UserHomeDir()
 	sent := 0
 	send := func(ev *event.Event) error {
-		_, err := daemon.Call(cfg, &daemon.Request{Op: daemon.OpEvent, Event: ev}, 5*time.Second)
+		// Nobody reads the answer, so recall must not run (or count anything as shown).
+		req := &daemon.Request{Op: daemon.OpEvent, Event: ev, NoContext: true}
+		_, err := daemon.Call(cfg, req, 5*time.Second)
 		if err != nil && daemon.IsUnavailable(err) && daemon.StartAndWait(cfg, 20*time.Second) == nil {
-			_, err = daemon.Call(cfg, &daemon.Request{Op: daemon.OpEvent, Event: ev}, 5*time.Second)
+			_, err = daemon.Call(cfg, req, 5*time.Second)
 		}
 		if err != nil {
+			daemon.Sanitize(cfg, ev)
 			return daemon.SpoolAppend(cfg.SpoolPath(), ev)
 		}
 		sent++

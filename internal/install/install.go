@@ -335,7 +335,8 @@ func isOurEntry(v any) bool {
 			}
 		}
 	}
-	return len(words) >= 2 && filepath.Base(words[0]) == "amem" && words[len(words)-1] == "mcp"
+	// Release binaries are named amem-linux-amd64 and the like.
+	return len(words) >= 2 && strings.HasPrefix(filepath.Base(words[0]), "amem") && words[len(words)-1] == "mcp"
 }
 
 // --- runtimes -------------------------------------------------------------------
@@ -361,6 +362,19 @@ func claudeCode(o Options, uninstall bool) ([]Change, error) {
 	changes := []Change{c}
 	if !o.SkipMCP {
 		// ~/.claude.json is Claude Code's live state file; let the CLI edit it.
+		// ~/.claude.json is only read here, to make sure an existing "amem" server is ours.
+		if raw, err := readFile(filepath.Join(o.Home, ".claude.json")); err == nil && raw != "" {
+			if doc, err := parseObject(raw); err == nil {
+				if servers, _ := doc.get("mcpServers").(*object); servers != nil {
+					if cur := servers.get("amem"); cur != nil && !isOurEntry(cur) {
+						if uninstall {
+							return changes, nil // someone else's server: leave it alone
+						}
+						return nil, fmt.Errorf(`a user-scope MCP server named "amem" exists that amem did not install; rename or remove it first`)
+					}
+				}
+			}
+		}
 		// Remove first: `add` refuses an existing name, which would keep a stale binary path.
 		changes = append(changes, Change{Cmd: []string{"claude", "mcp", "remove", "--scope", "user", "amem"}, Note: "unregister MCP server"})
 		if !uninstall {

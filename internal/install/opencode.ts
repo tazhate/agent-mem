@@ -23,6 +23,7 @@ export const AmemPlugin: Plugin = async ({ directory }) => {
   const turnContext = new Map<string, string[]>()
   const roles = new Map<string, string>() // messageID -> role
   const lastAssistant = new Map<string, string>()
+  const seenPrompt = new Set<string>()
 
   const add = (sid: string, ctx: string) => {
     if (!ctx) return
@@ -37,7 +38,9 @@ export const AmemPlugin: Plugin = async ({ directory }) => {
       const sid = output?.message?.sessionID
       if (!sid) return
       const text = (output.parts ?? []).filter((p: any) => p.type === "text").map((p: any) => p.text).join("\n")
-      turnContext.set(sid, [])
+      // The first prompt keeps what session start injected; later prompts start fresh.
+      if (seenPrompt.has(sid)) turnContext.set(sid, [])
+      seenPrompt.add(sid)
       add(sid, await call({ kind: "prompt", session_id: sid, cwd: directory, prompt: text }))
     },
     "tool.execute.after": async (input: any, output: any) => {
@@ -79,6 +82,7 @@ export const AmemPlugin: Plugin = async ({ directory }) => {
           await call({ kind: "session_end", session_id: sid, cwd: directory })
           turnContext.delete(sid)
           lastAssistant.delete(sid)
+          seenPrompt.delete(sid)
           break
       }
     },

@@ -161,12 +161,14 @@ func (s *Server) api(ctx context.Context, op string, raw json.RawMessage) (any, 
 		if err != nil {
 			return nil, err
 		}
-		// Work state comes straight from MCP, so it gets the same cleaning as captured text.
-		for k, v := range p.Fields {
-			if str, ok := v.(string); ok {
-				p.Fields[k] = s.red.Clean(str)
-			}
+		// Work state comes straight from MCP, so it gets the same cleaning as captured text,
+		// nested values included.
+		raw, _ := json.Marshal(p.Fields)
+		var cleaned map[string]any
+		if err := json.Unmarshal(redact.CleanJSON(raw, s.red.Clean), &cleaned); err != nil {
+			return nil, err
 		}
+		p.Fields = cleaned
 		if err := s.st.AppendWork(ctx, id, s.red.Clean(p.List), p.Fields); err != nil {
 			return nil, err
 		}

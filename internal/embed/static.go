@@ -2,7 +2,9 @@ package embed
 
 import (
 	"context"
+	"crypto/sha256"
 	"encoding/binary"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -46,6 +48,13 @@ func LoadStatic(dir string) (*Static, error) {
 	if s.rows < len(s.scores) {
 		return nil, fmt.Errorf("model has %d rows for %d tokens", s.rows, len(s.scores))
 	}
+	// Vectors are tagged with the model identity; new weights under the same directory name
+	// must not be compared with old vectors.
+	fp, err := fingerprint(filepath.Join(dir, "tokenizer.json"), filepath.Join(dir, "model.safetensors"))
+	if err != nil {
+		return nil, err
+	}
+	s.name += "@" + fp
 	return s, nil
 }
 
@@ -277,4 +286,29 @@ func (s *Static) Tokenize(text string) []int32 {
 func runeLen(s string) int {
 	_, size := utf8.DecodeRuneInString(s)
 	return size
+}
+
+// fingerprint hashes the tokenizer and the weights' size and header: cheap, and it changes
+// with any new model revision.
+func fingerprint(tokenizer, weights string) (string, error) {
+	h := sha256.New()
+	b, err := os.ReadFile(tokenizer)
+	if err != nil {
+		return "", err
+	}
+	h.Write(b)
+	f, err := os.Open(weights)
+	if err != nil {
+		return "", err
+	}
+	defer f.Close()
+	st, err := f.Stat()
+	if err != nil {
+		return "", err
+	}
+	fmt.Fprintf(h, "%d", st.Size())
+	head := make([]byte, 64<<10)
+	n, _ := f.Read(head)
+	h.Write(head[:n])
+	return hex.EncodeToString(h.Sum(nil))[:12], nil
 }

@@ -6,6 +6,7 @@ package observer
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"slices"
@@ -216,17 +217,23 @@ func (o *Observer) observe(ctx context.Context, prov provider.Provider, sess sto
 		return err
 	}
 	var out struct {
-		Memories []draft `json:"memories"`
+		Memories *[]draft `json:"memories"`
 	}
 	if err := json.Unmarshal(raw, &out); err != nil {
 		return fmt.Errorf("decode observer output: %w", err)
 	}
+	// {} or {"memories": null} is not an answer (fallback providers without schema
+	// enforcement return those); only an explicit list, possibly empty, completes a batch.
+	if out.Memories == nil {
+		return fmt.Errorf("observer output has no memories list: %.200s", raw)
+	}
+	drafts := *out.Memories
 	shown := map[int64]bool{}
 	for _, m := range existing {
 		shown[m.ID] = true
 	}
 	stored := 0
-	for _, d := range out.Memories {
+	for _, d := range drafts {
 		m := d.memory(sess, turns[len(turns)-1].n)
 		if m == nil {
 			continue
@@ -283,11 +290,13 @@ func (o *Observer) related(ctx context.Context, projectID int64, turns []turn) [
 // is skipped.
 const maxFailures = 6
 
-// fail records a failure with exponential backoff and reports whether to give up.
+// fail records a failure with exponential backoff and reports whether to give up. Outages
+// (rate limits, network, provider down, timeouts) never give up: the batch waits, at most
+// 30 minutes between tries. Only output the model keeps getting wrong is skipped.
 func (o *Observer) fail(key string, err error) bool {
 	o.fails[key]++
 	n := o.fails[key]
-	if n >= maxFailures {
+	if n >= maxFailures && !retryable(err) {
 		delete(o.fails, key)
 		delete(o.backoff, key)
 		return true
@@ -464,4 +473,15 @@ func clipList(s []string, n, each int) []string {
 		}
 	}
 	return out
+}
+
+func retryable(err error) bool {
+	if errors.Is(err, context.DeadlineExceeded) || errors.Is(err, context.Canceled) {
+		return true
+	}
+	var pe *provider.Error
+	if errors.As(err, &pe) {
+		return pe.Retryable
+	}
+	return false
 }

@@ -18,6 +18,7 @@ import (
 	"time"
 
 	"github.com/tazhate/agent-mem/internal/event"
+	"github.com/tazhate/agent-mem/internal/redact"
 	"github.com/tazhate/agent-mem/internal/store"
 )
 
@@ -51,6 +52,8 @@ var Presets = map[string]Preset{
 	"claude": {Name: "claude", Glob: func(h string) []string { return []string{filepath.Join(h, ".claude", "projects")} }, Parser: claudeParser{}},
 	"codex":  {Name: "codex", Glob: func(h string) []string { return []string{filepath.Join(h, ".codex", "sessions")} }, Parser: codexParser{}},
 }
+
+var pendingRedactor = redact.New(true)
 
 type Watcher struct {
 	st     *store.Store
@@ -175,7 +178,13 @@ func (w *Watcher) follow(ctx context.Context, path string, info os.FileInfo) err
 
 func (w *Watcher) save(ctx context.Context, fs *FileState, offset, size int64) error {
 	_, sub := fs.pending["__subagent"]
-	pending, _ := json.Marshal(fs.pending) // calls whose results are still to come
+	// Calls whose results are still to come; their arguments are cleaned like any capture.
+	clean := make(map[string]pendingTool, len(fs.pending))
+	for k, v := range fs.pending {
+		v.Input = redact.CleanJSON(v.Input, pendingRedactor.Clean)
+		clean[k] = v
+	}
+	pending, _ := json.Marshal(clean)
 	return w.st.Write(ctx, func(tx *sql.Tx) error {
 		_, err := tx.ExecContext(ctx, `INSERT INTO watch_state(path, offset, size, session, cwd, subagent, pending) VALUES (?, ?, ?, ?, ?, ?, ?)
 			ON CONFLICT(path) DO UPDATE SET offset = excluded.offset, size = excluded.size, session = excluded.session,

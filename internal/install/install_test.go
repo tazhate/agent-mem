@@ -189,3 +189,25 @@ func TestInstallerSafety(t *testing.T) {
 		t.Fatalf("tomlString: %s", tomlString("a\"b\\c\x01"))
 	}
 }
+
+func TestClaudeForeignMCPLeftAlone(t *testing.T) {
+	o := setup(t)
+	os.WriteFile(filepath.Join(o.Home, ".claude.json"), []byte(`{"mcpServers":{"amem":{"type":"http","url":"https://example.com/mcp"}}}`), 0o644)
+	if _, err := Run(Options{Home: o.Home, Binary: o.Binary, DryRun: true}, "claude-code", false); err == nil {
+		t.Fatal("foreign Claude MCP entry would be replaced")
+	}
+	ch, err := Run(Options{Home: o.Home, Binary: o.Binary, DryRun: true}, "claude-code", true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, c := range ch {
+		if len(c.Cmd) > 0 {
+			t.Fatalf("uninstall would run %v on a foreign entry", c.Cmd)
+		}
+	}
+	if !isOurEntry(mustObj(`{"command":"/opt/amem-linux-amd64","args":["mcp"]}`)) {
+		t.Fatal("release-named binary not recognized")
+	}
+}
+
+func mustObj(s string) *object { o, _ := parseObject(s); return o }
