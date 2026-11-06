@@ -48,3 +48,9 @@ func TestFatigue(t *testing.T) {
 	}
 	_ = fresh
 }
+
+func TestOneLineDropsControls(t *testing.T) {
+	if got := oneLine("fix \x1b[31mred\x1b[0m\n  build\x07"); got != "fix [31mred[0m build" {
+		t.Fatalf("oneLine: %q", got)
+	}
+}

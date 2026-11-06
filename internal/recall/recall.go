@@ -13,6 +13,7 @@ import (
 	"slices"
 	"strings"
 	"time"
+	"unicode"
 
 	"github.com/tazhate/agent-mem/internal/config"
 	"github.com/tazhate/agent-mem/internal/event"
@@ -488,7 +489,20 @@ func compactFields(m map[string]any) string {
 	return strings.Join(parts, " ")
 }
 
-func oneLine(s string) string { return strings.Join(strings.Fields(s), " ") }
+// oneLine collapses whitespace and drops control characters, so stored text (terminal
+// output with escapes, say) cannot break the formatting it is printed into.
+func oneLine(s string) string {
+	s = strings.Join(strings.Fields(s), " ")
+	if !strings.ContainsFunc(s, unicode.IsControl) {
+		return s
+	}
+	return strings.Map(func(r rune) rune {
+		if unicode.IsControl(r) {
+			return -1
+		}
+		return r
+	}, s)
+}
 
 func clip(s string, n int) string {
 	r := []rune(s)
@@ -552,7 +566,7 @@ func (e *Engine) startSummary(ctx context.Context, req Request) string {
 	p := painter(e.cfg.StartSummaryColor)
 	dot := p.paint(ansiDim, "·")
 	var b strings.Builder
-	fmt.Fprintf(&b, "%s %s %s %s %s", p.paint(ansiBold+ansiCyan, "amem"), dot, p.paint(ansiBold, req.ProjectName), dot,
+	fmt.Fprintf(&b, "%s %s %s %s %s", p.paint(ansiBold+ansiCyan, "amem"), dot, p.paint(ansiBold, oneLine(req.ProjectName)), dot,
 		p.paint(ansiDim, fmt.Sprintf("%d memories from %d sessions", nMem, nSess)))
 	if su, err := e.st.LatestSummary(ctx, req.ProjectID, req.SessionID); err == nil && su != nil {
 		fmt.Fprintf(&b, "\n%s %s: %s", p.paint(ansiYellow, "last session"),
@@ -574,7 +588,7 @@ func (e *Engine) startSummary(ctx context.Context, req Request) string {
 				}
 			}
 			if open > 0 {
-				parts = append(parts, fmt.Sprintf("%s (%d)", l.List, open))
+				parts = append(parts, fmt.Sprintf("%s (%d)", oneLine(l.List), open))
 			}
 		}
 		if len(parts) > 0 {
