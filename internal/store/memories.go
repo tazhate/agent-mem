@@ -322,6 +322,9 @@ type Scope struct {
 	Types     []string
 	// Since drops memories created before this unix ms time.
 	Since int64
+	// Fatigue drops memories shown at least this many times without ever being used
+	// (automatic recall only; 0 = off).
+	Fatigue int
 }
 
 func (sc Scope) where(args *[]any) string {
@@ -345,6 +348,10 @@ func (sc Scope) where(args *[]any) string {
 	if sc.Since > 0 {
 		b.WriteString(` AND m.created_at >= ?`)
 		*args = append(*args, sc.Since)
+	}
+	if sc.Fatigue > 0 {
+		b.WriteString(` AND NOT (m.inject_count >= ? AND m.use_count = 0)`)
+		*args = append(*args, sc.Fatigue)
 	}
 	return b.String()
 }

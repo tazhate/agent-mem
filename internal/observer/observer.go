@@ -362,7 +362,6 @@ type draft struct {
 	Body     string   `json:"body"`
 	Facts    []string `json:"facts"`
 	Files    []string `json:"files"`
-	Global   bool     `json:"global"`
 	Replaces []int64  `json:"replaces"`
 }
 
@@ -380,9 +379,6 @@ func (d draft) memory(sess store.Session, turn int) *store.Memory {
 		Body: clip(strings.TrimSpace(d.Body), 1500), Facts: clipList(d.Facts, 10, 300), Files: clipList(d.Files, 20, 400),
 		Origin: "observer",
 	}
-	if d.Global && typ == "preference" {
-		m.ProjectID = 0
-	}
 	return m
 }
 
@@ -396,14 +392,13 @@ var memorySchema = map[string]any{
 			"items": map[string]any{
 				"type":                 "object",
 				"additionalProperties": false,
-				"required":             []string{"type", "title", "body", "facts", "files", "global", "replaces"},
+				"required":             []string{"type", "title", "body", "facts", "files", "replaces"},
 				"properties": map[string]any{
 					"type":     map[string]any{"type": "string", "enum": store.Types},
 					"title":    map[string]any{"type": "string"},
 					"body":     map[string]any{"type": "string"},
 					"facts":    map[string]any{"type": "array", "items": map[string]any{"type": "string"}},
 					"files":    map[string]any{"type": "array", "items": map[string]any{"type": "string"}},
-					"global":   map[string]any{"type": "boolean"},
 					"replaces": map[string]any{"type": "array", "items": map[string]any{"type": "integer"}},
 				},
 			},
@@ -433,7 +428,7 @@ Memory types:
 - gotcha: a trap, surprising behavior, environment quirk or constraint that will bite again
 - change: what was built, changed, deployed or configured, and where
 - discovery: how something works (architecture, data flow, where things live) that took effort to learn
-- preference: how the user wants things done (style, tools, process); set global=true when it applies beyond this project
+- preference: how the user wants things done in this project (style, tools, process). Rules already written in the user's instruction files (CLAUDE.md, AGENTS.md) are not news: skip them
 - todo: work explicitly left for later
 
 Rules:

@@ -73,6 +73,9 @@ type RecallConfig struct {
 	// VectorFloor is the cosine similarity that maps to zero relevance; it depends on the
 	// embedding model (unrelated texts sit around 0.2-0.4 for paraphrase-multilingual).
 	VectorFloor float64 `toml:"vector_floor"`
+	// FatigueAfter stops automatic injection of a memory shown this many times without ever
+	// being used; explicit search still finds it. 0 disables.
+	FatigueAfter int `toml:"fatigue_after"`
 }
 
 type ObserverConfig struct {
@@ -133,6 +136,7 @@ func Default() *Config {
 			MinScore:            0.25,
 			GlobalPreferences:   true,
 			VectorFloor:         0.40,
+			FatigueAfter:        10,
 		},
 		Observer: ObserverConfig{
 			Enabled:     true,

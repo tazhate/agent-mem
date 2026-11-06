@@ -74,7 +74,8 @@ func (e *Engine) Recall(ctx context.Context, req Request) (Result, error) {
 	if spent >= e.cfg.SessionBudgetTokens {
 		strict = 1.5
 	}
-	scope := store.Scope{ProjectID: req.ProjectID}
+	// Automatic injection skips memories that were shown again and again without being used.
+	scope := store.Scope{ProjectID: req.ProjectID, Fatigue: e.cfg.FatigueAfter}
 	switch ev.Kind {
 	case event.SessionStart:
 		if ev.Source == "compact" || ev.Source == "resume" {
@@ -205,7 +206,8 @@ func (e *Engine) Search(ctx context.Context, text string, scope store.Scope, lim
 	for _, m := range mems {
 		// Vector hits come from an index that may lag behind supersede/private changes.
 		if m.SupersededBy != 0 || m.Private || (!scope.All && m.ProjectID != scope.ProjectID && m.ProjectID != 0) ||
-			(len(scope.Types) > 0 && !slices.Contains(scope.Types, m.Type)) {
+			(len(scope.Types) > 0 && !slices.Contains(scope.Types, m.Type)) ||
+			(scope.Fatigue > 0 && m.InjectCount >= scope.Fatigue && m.UseCount == 0) {
 			continue
 		}
 		have := map[string]bool{}
@@ -291,11 +293,11 @@ func (e *Engine) sessionStart(ctx context.Context, req Request, seen map[int64]b
 		}
 		b.WriteString("\n")
 	}
-	durable, err := e.st.Durable(ctx, store.Scope{ProjectID: req.ProjectID}, 30)
+	durable, err := e.st.Durable(ctx, store.Scope{ProjectID: req.ProjectID, Fatigue: e.cfg.FatigueAfter}, 30)
 	if err != nil {
 		return Result{}, err
 	}
-	recent, err := e.st.Recent(ctx, store.Scope{ProjectID: req.ProjectID}, 10)
+	recent, err := e.st.Recent(ctx, store.Scope{ProjectID: req.ProjectID, Fatigue: e.cfg.FatigueAfter}, 10)
 	if err != nil {
 		return Result{}, err
 	}
