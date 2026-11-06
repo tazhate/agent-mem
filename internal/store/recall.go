@@ -392,3 +392,11 @@ func (s *Store) LastAssistant(ctx context.Context, sessionID string) (string, er
 	}
 	return out, err
 }
+
+// ProjectCounts returns visible memories and sessions of a project.
+func (s *Store) ProjectCounts(ctx context.Context, projectID int64) (memories, sessions int, err error) {
+	err = s.db.QueryRowContext(ctx, `SELECT
+		(SELECT count(*) FROM memories WHERE project_id = ?1 AND private = 0 AND superseded_by IS NULL),
+		(SELECT count(*) FROM sessions WHERE project_id = ?1)`, projectID).Scan(&memories, &sessions)
+	return memories, sessions, err
+}

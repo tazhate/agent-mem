@@ -76,6 +76,11 @@ type RecallConfig struct {
 	// FatigueAfter stops automatic injection of a memory shown this many times without ever
 	// being used; explicit search still finds it. 0 disables.
 	FatigueAfter int `toml:"fatigue_after"`
+	// StartSummary shows the user a short summary of the project's memory at session start
+	// (runtimes with a user-visible hook message: Claude Code, Codex, Gemini CLI).
+	StartSummary bool `toml:"start_summary"`
+	// StartSummaryItems is how many recent memories the summary lists.
+	StartSummaryItems int `toml:"start_summary_items"`
 }
 
 type ObserverConfig struct {
@@ -141,6 +146,8 @@ func Default() *Config {
 			GlobalPreferences:   true,
 			VectorFloor:         0.40,
 			FatigueAfter:        10,
+			StartSummary:        true,
+			StartSummaryItems:   5,
 		},
 		Observer: ObserverConfig{
 			Enabled:     true,

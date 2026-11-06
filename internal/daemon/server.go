@@ -185,7 +185,7 @@ func (s *Server) Run(ctx context.Context, foreground bool) error {
 
 func (s *Server) drainSpool(ctx context.Context) {
 	n, err := SpoolDrain(s.cfg.SpoolPath(), func(ev *event.Event) error {
-		_, _, err := s.ingest(ctx, ev, false)
+		_, _, _, err := s.ingest(ctx, ev, false)
 		return err
 	})
 	if err != nil {
@@ -312,7 +312,7 @@ func (s *Server) handle(ctx context.Context, req *Request) (Response, func()) {
 			err = errors.New("missing event")
 			break
 		}
-		resp.Context, after, err = s.ingest(ctx, req.Event, !req.NoContext)
+		resp.Context, resp.Display, after, err = s.ingest(ctx, req.Event, !req.NoContext)
 	default:
 		data, err = s.api(ctx, req.Op, req.Params)
 	}
@@ -370,18 +370,18 @@ var ownTool = regexp.MustCompile(`(^|_)(memory_search|memory_get|memory_timeline
 
 // ingest stores an event and, when the runtime can take it, returns context to inject plus a
 // commit func that records the injection once the answer reached the hook.
-func (s *Server) ingest(ctx context.Context, ev *event.Event, live bool) (string, func(), error) {
+func (s *Server) ingest(ctx context.Context, ev *event.Event, live bool) (string, string, func(), error) {
 	if ev.TS == 0 {
 		ev.TS = event.NowMS()
 	}
 	sid := ev.SessionID()
 	pid, info, err := s.projectFor(ctx, ev.Cwd)
 	if err != nil {
-		return "", nil, err
+		return "", "", nil, err
 	}
 	// Cheap duplicate check before the expensive cleaning (redelivery after a hook timeout).
 	if seen, err := s.st.SeenEvent(ctx, ev.ID); err == nil && seen {
-		return "", nil, nil
+		return "", "", nil, nil
 	}
 	privatePrompt := s.clean(ev)
 
@@ -431,10 +431,10 @@ func (s *Server) ingest(ctx context.Context, ev *event.Event, live bool) (string
 		_, err = s.st.InsertEvent(ctx, tx, toRow(ev, sid, turn))
 		return err
 	}); err != nil {
-		return "", nil, err
+		return "", "", nil, err
 	}
 	if dup {
-		return "", nil, nil
+		return "", "", nil, nil
 	}
 
 	if !inPrivate {
@@ -448,15 +448,15 @@ func (s *Server) ingest(ctx context.Context, ev *event.Event, live bool) (string
 	}
 
 	if !live || !ev.Kind.WantsContext() || s.cfg.Recall.Mode == "off" || isOwn {
-		return "", nil, nil
+		return "", "", nil, nil
 	}
 	res, err := s.rec.Recall(ctx, recall.Request{Event: ev, SessionID: sid, ProjectID: pid, ProjectName: info.Name})
 	if err != nil {
 		s.log.Warn("recall", "err", err)
-		return "", nil, nil
+		return "", "", nil, nil
 	}
 	if len(res.Items) == 0 && res.Text == "" {
-		return "", nil, nil
+		return "", res.Display, nil, nil
 	}
 	shadow := s.cfg.Recall.Mode == "shadow"
 	commit := func() {
@@ -466,9 +466,9 @@ func (s *Server) ingest(ctx context.Context, ev *event.Event, live bool) (string
 	}
 	if shadow {
 		commit()
-		return "", nil, nil
+		return "", res.Display, nil, nil
 	}
-	return res.Text, commit, nil
+	return res.Text, res.Display, commit, nil
 }
 
 func toRow(ev *event.Event, sid string, turn int) store.EventRow {

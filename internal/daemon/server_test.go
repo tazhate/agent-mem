@@ -242,7 +242,7 @@ func TestSaveAndWorkStateRedacted(t *testing.T) {
 
 // ingestCommit runs ingest and commits injections as if the hook received the answer.
 func ingestCommit(s *Server, ctx context.Context, ev *event.Event, live bool) (string, error) {
-	text, commit, err := s.ingest(ctx, ev, live)
+	text, _, commit, err := s.ingest(ctx, ev, live)
 	if commit != nil {
 		commit()
 	}
@@ -328,5 +328,14 @@ func TestNestedWorkFieldsRedacted(t *testing.T) {
 	s.st.DB().QueryRow(`SELECT fields FROM work_entries`).Scan(&raw)
 	if strings.Contains(raw, "hunter2") || strings.Contains(raw, "abcdefgh12345") {
 		t.Fatalf("nested work fields: %s", raw)
+	}
+}
+
+func TestStartSummaryDisplay(t *testing.T) {
+	s, repo := newServer(t, "on")
+	seed(t, s, repo)
+	_, display, _, err := s.ingest(t.Context(), &event.Event{Runtime: "claude-code", NativeSession: "d1", Cwd: repo, Kind: event.SessionStart, Source: "startup", ID: event.NewID()}, true)
+	if err != nil || !strings.Contains(display, "1 memories") || !strings.Contains(display, "запечатан") {
+		t.Fatalf("display: %v %q", err, display)
 	}
 }

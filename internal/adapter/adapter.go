@@ -30,6 +30,12 @@ type Adapter interface {
 	CanInject(ev *event.Event, hookArg string) bool
 }
 
+// Displayer is implemented by runtimes that can also show a short message to the user (not
+// to the model), e.g. a session-start summary.
+type Displayer interface {
+	RenderDisplay(ev *event.Event, hookArg string, context, display string) []byte
+}
+
 var registry = map[string]Adapter{}
 
 func register(a Adapter) { registry[a.Name()] = a }
@@ -197,13 +203,25 @@ func truncateContext(s string) string {
 
 // hookSpecific renders the hookSpecificOutput envelope shared by Claude Code, Codex and Gemini CLI.
 func hookSpecific(eventName, context string) []byte {
-	b, _ := json.Marshal(map[string]any{
+	return hookSpecificWithMessage(eventName, context, "")
+}
+
+// hookSpecificWithMessage adds systemMessage, which these runtimes show to the user.
+func hookSpecificWithMessage(eventName, context, message string) []byte {
+	out := map[string]any{
 		"hookSpecificOutput": map[string]string{
 			"hookEventName":     eventName,
 			"additionalContext": truncateContext(context),
 		},
-	})
-	return b
+	}
+	if message != "" {
+		out["systemMessage"] = message
+	}
+	var b bytes.Buffer
+	enc := json.NewEncoder(&b)
+	enc.SetEscapeHTML(false)
+	_ = enc.Encode(out)
+	return bytes.TrimRight(b.Bytes(), "\n")
 }
 
 // toolFromPayload builds the Tool part shared by snake_case runtimes.

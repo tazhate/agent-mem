@@ -98,3 +98,11 @@ func firstOf(s []string) string {
 func (claudeCode) CanInject(ev *event.Event, hookArg string) bool {
 	return claudeContextEvents[firstNonEmpty(hookArg, hookNameFor(claudeKinds, ev.Kind))]
 }
+
+func (a claudeCode) RenderDisplay(ev *event.Event, hookArg string, context, display string) []byte {
+	name := firstNonEmpty(hookArg, hookNameFor(claudeKinds, ev.Kind))
+	if display == "" || name != "SessionStart" {
+		return a.Render(ev, hookArg, context)
+	}
+	return hookSpecificWithMessage(name, context, display)
+}

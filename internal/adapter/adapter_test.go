@@ -148,3 +148,25 @@ func TestGeminiDocumentedFields(t *testing.T) {
 		t.Fatalf("AfterTool failure: %v %+v %+v", err, ev, ev.Tool)
 	}
 }
+
+func TestStartDisplay(t *testing.T) {
+	cc, _ := Get("claude-code")
+	d := cc.(Displayer)
+	var out struct {
+		Msg string `json:"systemMessage"`
+		H   struct {
+			Ctx string `json:"additionalContext"`
+		} `json:"hookSpecificOutput"`
+	}
+	if err := json.Unmarshal(d.RenderDisplay(&event.Event{Kind: event.SessionStart}, "SessionStart", "ctx <amem-context>", "amem · p · 3 memories"), &out); err != nil ||
+		out.Msg != "amem · p · 3 memories" || out.H.Ctx != "ctx <amem-context>" {
+		t.Fatalf("claude display: %v %+v", err, out)
+	}
+	// Only session start shows a summary; other hooks render as before.
+	if b := d.RenderDisplay(&event.Event{Kind: event.Prompt}, "UserPromptSubmit", "", "x"); b != nil {
+		t.Fatalf("display leaked into prompt hook: %s", b)
+	}
+	if _, ok := Adapter(cursor{}).(Displayer); ok {
+		t.Fatal("cursor has no user-visible hook message")
+	}
+}

@@ -6,6 +6,8 @@ Cross-session memory for AI agents: Claude Code, Codex, Gemini CLI, Cursor, Open
 
 What it does. Hooks send session events to a local daemon. Once per turn, the observer compresses them into short memories with a model of your choice. Recall hands the agent what it needs at the moment it needs it: at session start, on a prompt, before reading a file that has history, on a failed command, after compact. Search is local, p99 18 ms on 108k memories, so it can run often and never makes the agent wait.
 
+You see it too: when a session starts, Claude Code, Codex and Gemini CLI show a short summary of what amem knows about the project - how many memories, what the last session was about and where it stopped, open work, the latest few memories. Turn it off with `recall.start_summary = false`, or change the list length with `recall.start_summary_items`.
+
 The concept and the reasoning behind the design are in [DESIGN.md](DESIGN.md).
 
 ## Installation

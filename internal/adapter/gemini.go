@@ -46,3 +46,11 @@ func (gemini) Render(ev *event.Event, hookArg string, context string) []byte {
 func (gemini) CanInject(ev *event.Event, hookArg string) bool {
 	return geminiContextEvents[firstNonEmpty(hookArg, hookNameFor(geminiKinds, ev.Kind))]
 }
+
+func (a gemini) RenderDisplay(ev *event.Event, hookArg string, context, display string) []byte {
+	name := firstNonEmpty(hookArg, hookNameFor(geminiKinds, ev.Kind))
+	if display == "" || name != "SessionStart" {
+		return a.Render(ev, hookArg, context)
+	}
+	return hookSpecificWithMessage(name, context, display)
+}
