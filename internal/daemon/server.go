@@ -274,14 +274,24 @@ func (s *Server) serve(ctx context.Context, conn net.Conn) {
 	}
 }
 
-// shouldRestart: an explicit restart request, or a different build of this same binary file
-// (it was replaced on disk). Other installed copies of amem never restart the daemon, so two
-// versions side by side cannot make it flap.
+// shouldRestart: an explicit restart request, or a newer build of this same binary file (it was
+// replaced on disk). Other installed copies and older builds still running in long-lived
+// processes never restart the daemon, so it cannot flap.
 func (s *Server) shouldRestart(req *Request) bool {
 	if req.Op == OpRestart {
 		return true
 	}
-	return req.Version != "" && req.Version != Version && req.Exe != "" && req.Exe == selfExe()
+	return req.Version != "" && req.Version != Version && req.Exe != "" && req.Exe == selfExe() && newer(req.Built, BuildTime)
+}
+
+// newer reports whether build time a is later than b (RFC 3339; unknown never wins).
+func newer(a, b string) bool {
+	ta, errA := time.Parse(time.RFC3339, a)
+	tb, errB := time.Parse(time.RFC3339, b)
+	if errA != nil {
+		return false
+	}
+	return errB != nil || ta.After(tb)
 }
 
 func (s *Server) handle(ctx context.Context, req *Request) (Response, func()) {

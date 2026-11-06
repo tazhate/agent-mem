@@ -157,3 +157,20 @@ func TestChainPerProviderTimeout(t *testing.T) {
 		t.Fatalf("fallback after timeout: %s %v", out, err)
 	}
 }
+
+func TestClaudePresetUsesSubscriptionEnv(t *testing.T) {
+	dir := t.TempDir()
+	script := filepath.Join(dir, "claude") // the preset is recognized by the command name
+	os.WriteFile(script, []byte(`#!/bin/sh
+cat > /dev/null
+[ -z "$ANTHROPIC_BASE_URL$ANTHROPIC_API_KEY$ANTHROPIC_DEFAULT_HAIKU_MODEL" ] || { echo "leaked: $ANTHROPIC_BASE_URL" >&2; exit 5; }
+echo '{"type":"result","is_error":false,"structured_output":{"ok":true}}'
+`), 0o755)
+	t.Setenv("ANTHROPIC_BASE_URL", "https://api.z.ai/api/anthropic")
+	t.Setenv("ANTHROPIC_API_KEY", "sk-test")
+	t.Setenv("ANTHROPIC_DEFAULT_HAIKU_MODEL", "glm-5.3-flash")
+	p, _ := New(t.Context(), config.ProviderConfig{Kind: "exec", Command: []string{script}})
+	if out, err := p.Complete(t.Context(), Request{Schema: schema}); err != nil || string(out) != `{"ok":true}` {
+		t.Fatalf("%s %v", out, err)
+	}
+}

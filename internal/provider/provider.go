@@ -9,6 +9,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -63,7 +64,11 @@ func New(ctx context.Context, c config.ProviderConfig) (Provider, error) {
 		if len(c.Command) == 0 {
 			return nil, fmt.Errorf("provider %s: exec needs command", name)
 		}
-		return &execProvider{name: name, command: c.Command, model: c.Model}, nil
+		unset := c.EnvUnset
+		if unset == nil && filepath.Base(c.Command[0]) == "claude" {
+			unset = ClaudeSubscriptionUnset
+		}
+		return &execProvider{name: name, command: c.Command, model: c.Model, unset: unset}, nil
 	}
 	return nil, fmt.Errorf("provider %s: unknown kind %q (anthropic, openai, exec)", name, c.Kind)
 }
