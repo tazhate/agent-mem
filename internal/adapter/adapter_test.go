@@ -169,4 +169,17 @@ func TestStartDisplay(t *testing.T) {
 	if _, ok := Adapter(cursor{}).(Displayer); ok {
 		t.Fatal("cursor has no user-visible hook message")
 	}
+	// Claude Code keeps ANSI colors; Codex and Gemini get plain text.
+	colored := "\x1b[1;36mamem\x1b[0m · \x1b[2m3 memories\x1b[0m"
+	if err := json.Unmarshal(d.RenderDisplay(&event.Event{Kind: event.SessionStart}, "SessionStart", "", colored), &out); err != nil || out.Msg != colored {
+		t.Fatalf("claude dropped colors: %v %q", err, out.Msg)
+	}
+	for _, rt := range []string{"codex", "gemini"} {
+		a, _ := Get(rt)
+		out.Msg = ""
+		if err := json.Unmarshal(a.(Displayer).RenderDisplay(&event.Event{Kind: event.SessionStart}, "SessionStart", "", colored), &out); err != nil ||
+			out.Msg != "amem · 3 memories" {
+			t.Fatalf("%s display: %v %q", rt, err, out.Msg)
+		}
+	}
 }

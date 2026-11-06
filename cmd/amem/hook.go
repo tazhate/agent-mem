@@ -86,7 +86,11 @@ func cmdHook(args []string) (code int) {
 		return empty()
 	}
 	if d, ok := ad.(adapter.Displayer); ok && resp.Display != "" {
-		out(d.RenderDisplay(ev, hookArg, resp.Context, resp.Display))
+		display := resp.Display
+		if os.Getenv("NO_COLOR") != "" {
+			display = adapter.StripANSI(display)
+		}
+		out(d.RenderDisplay(ev, hookArg, resp.Context, display))
 		return 0
 	}
 	out(ad.Render(ev, hookArg, resp.Context))

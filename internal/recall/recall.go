@@ -508,6 +508,40 @@ func shortPath(p string) string {
 
 func clamp01(v float64) float64 { return max(0, min(1, v)) }
 
+// ANSI styles for the session-start summary. Claude Code renders them in a hook's
+// systemMessage; adapters for runtimes that print escapes literally strip them.
+const (
+	ansiReset   = "\x1b[0m"
+	ansiBold    = "\x1b[1m"
+	ansiDim     = "\x1b[2m"
+	ansiRed     = "\x1b[31m"
+	ansiGreen   = "\x1b[32m"
+	ansiYellow  = "\x1b[33m"
+	ansiBlue    = "\x1b[34m"
+	ansiMagenta = "\x1b[35m"
+	ansiCyan    = "\x1b[36m"
+)
+
+var typeColor = map[string]string{
+	"decision":   ansiBlue,
+	"bugfix":     ansiRed,
+	"gotcha":     ansiYellow,
+	"change":     ansiGreen,
+	"discovery":  ansiCyan,
+	"preference": ansiMagenta,
+	"todo":       ansiMagenta,
+}
+
+// painter wraps text in an ANSI style, or returns it as is when color is off.
+type painter bool
+
+func (p painter) paint(style, s string) string {
+	if !p || style == "" || s == "" {
+		return s
+	}
+	return style + s + ansiReset
+}
+
 // startSummary is what the user sees when a session starts: what amem knows about this
 // project, in a few lines.
 func (e *Engine) startSummary(ctx context.Context, req Request) string {
@@ -515,15 +549,19 @@ func (e *Engine) startSummary(ctx context.Context, req Request) string {
 	if err != nil || nMem == 0 {
 		return ""
 	}
+	p := painter(e.cfg.StartSummaryColor)
+	dot := p.paint(ansiDim, "·")
 	var b strings.Builder
-	fmt.Fprintf(&b, "amem · %s · %d memories from %d sessions", req.ProjectName, nMem, nSess)
+	fmt.Fprintf(&b, "%s %s %s %s %s", p.paint(ansiBold+ansiCyan, "amem"), dot, p.paint(ansiBold, req.ProjectName), dot,
+		p.paint(ansiDim, fmt.Sprintf("%d memories from %d sessions", nMem, nSess)))
 	if su, err := e.st.LatestSummary(ctx, req.ProjectID, req.SessionID); err == nil && su != nil {
-		fmt.Fprintf(&b, "\nlast session %s: %s", time.UnixMilli(su.CreatedAt).Format("02.01 15:04"), clip(oneLine(su.Request), 110))
+		fmt.Fprintf(&b, "\n%s %s: %s", p.paint(ansiYellow, "last session"),
+			p.paint(ansiDim, time.UnixMilli(su.CreatedAt).Format("02.01 15:04")), clip(oneLine(su.Request), 110))
 		if su.Completed != "" {
-			b.WriteString("\n  done: " + clip(oneLine(su.Completed), 120))
+			b.WriteString("\n  " + p.paint(ansiGreen, "done:") + " " + clip(oneLine(su.Completed), 120))
 		}
 		if su.NextSteps != "" {
-			b.WriteString("\n  next: " + clip(oneLine(su.NextSteps), 120))
+			b.WriteString("\n  " + p.paint(ansiMagenta, "next:") + " " + clip(oneLine(su.NextSteps), 120))
 		}
 	}
 	if lists, err := e.st.WorkLists(ctx, req.ProjectID, "", false); err == nil && len(lists) > 0 {
@@ -540,14 +578,16 @@ func (e *Engine) startSummary(ctx context.Context, req Request) string {
 			}
 		}
 		if len(parts) > 0 {
-			b.WriteString("\nopen work: " + clip(strings.Join(parts, ", "), 120))
+			b.WriteString("\n" + p.paint(ansiYellow, "open work:") + " " + clip(strings.Join(parts, ", "), 120))
 		}
 	}
 	recent, err := e.st.Recent(ctx, store.Scope{ProjectID: req.ProjectID}, max(e.cfg.StartSummaryItems, 1))
 	if err == nil && len(recent) > 0 {
-		b.WriteString("\nrecent:")
+		b.WriteString("\n" + p.paint(ansiDim, "recent:"))
 		for _, m := range recent {
-			fmt.Fprintf(&b, "\n  #%d %s %s · %s", m.ID, time.UnixMilli(m.CreatedAt).Format("02.01"), m.Type, clip(oneLine(m.Title), 90))
+			fmt.Fprintf(&b, "\n  %s %s %s %s %s", p.paint(ansiDim, fmt.Sprintf("#%d", m.ID)),
+				p.paint(ansiDim, time.UnixMilli(m.CreatedAt).Format("02.01")), p.paint(typeColor[m.Type], m.Type), dot,
+				clip(oneLine(m.Title), 90))
 		}
 	}
 	return b.String()
