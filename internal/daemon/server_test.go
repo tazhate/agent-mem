@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/tazhate/agent-mem/internal/config"
 	"github.com/tazhate/agent-mem/internal/event"
@@ -252,10 +253,26 @@ func TestRestartOnlyForOwnBinary(t *testing.T) {
 	if s.shouldRestart(&Request{Version: "other", Exe: "/somewhere/else/amem"}) {
 		t.Fatal("another installed copy must not restart the daemon")
 	}
-	if !s.shouldRestart(&Request{Version: "other", Exe: selfExe()}) {
-		t.Fatal("a rebuilt copy of the same binary should take over")
+	if !s.shouldRestart(&Request{Version: "other", Exe: selfExe(), Built: time.Now().UTC().Format(time.RFC3339)}) {
+		t.Fatal("a newer build of the same binary should take over")
+	}
+	if s.shouldRestart(&Request{Version: "other", Exe: selfExe(), Built: "2020-01-01T00:00:00Z"}) && BuildTime != "" {
+		t.Fatal("an older build still running in a long-lived process must not restart the daemon")
+	}
+	if s.shouldRestart(&Request{Version: "other", Exe: selfExe()}) {
+		t.Fatal("a client without build time must not restart the daemon")
 	}
 	if s.shouldRestart(&Request{Version: Version, Exe: selfExe()}) || !s.shouldRestart(&Request{Op: OpRestart}) {
 		t.Fatal("restart rules")
+	}
+}
+
+func TestDaemonEnvDropsSessionRedirects(t *testing.T) {
+	t.Setenv("ANTHROPIC_BASE_URL", "https://api.z.ai/api/anthropic")
+	t.Setenv("ANTHROPIC_DEFAULT_HAIKU_MODEL", "glm-5.3-flash")
+	t.Setenv("ANTHROPIC_API_KEY", "kept-for-env-refs")
+	env := strings.Join(DaemonEnv(), "\n")
+	if strings.Contains(env, "z.ai") || strings.Contains(env, "glm-5.3") || !strings.Contains(env, "AMEM_DISABLE=1") || !strings.Contains(env, "kept-for-env-refs") {
+		t.Fatalf("daemon env:\n%s", env)
 	}
 }

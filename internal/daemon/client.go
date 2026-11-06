@@ -10,6 +10,8 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
+	"strings"
 	"syscall"
 	"time"
 
@@ -18,7 +20,7 @@ import (
 
 // Call sends one request and waits for the answer within timeout.
 func Call(cfg *config.Config, req *Request, timeout time.Duration) (*Response, error) {
-	req.V, req.Version = ProtocolVersion, Version
+	req.V, req.Version, req.Built = ProtocolVersion, Version, BuildTime
 	if req.Exe == "" {
 		req.Exe = selfExe()
 	}
@@ -99,7 +101,7 @@ func Spawn(cfg *config.Config) error {
 	cmd.Dir = "/" // do not pin whatever directory the first hook ran in
 	cmd.Stdout, cmd.Stderr = logf, logf
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setsid: true}
-	cmd.Env = append(os.Environ(), "AMEM_DISABLE=1") // children of the daemon (CLI observers) must not re-enter hooks
+	cmd.Env = DaemonEnv() // children of the daemon (CLI observers) must not re-enter hooks
 	if err := cmd.Start(); err != nil {
 		return err
 	}
@@ -125,7 +127,7 @@ func StartAndWait(cfg *config.Config, timeout time.Duration) error {
 	cmd.Dir = "/"
 	cmd.Stdout, cmd.Stderr = logf, logf
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setsid: true}
-	cmd.Env = append(os.Environ(), "AMEM_DISABLE=1")
+	cmd.Env = DaemonEnv()
 	if err := cmd.Start(); err != nil {
 		return err
 	}
@@ -179,4 +181,31 @@ func cmpOr(a, b string) string {
 		return a
 	}
 	return b
+}
+
+// sessionVars redirect one agent session to another backend or model (claude-zai sets
+// ANTHROPIC_BASE_URL to z.ai and maps haiku to a GLM model). The daemon outlives the session
+// that happened to start it, so it must not inherit them.
+var sessionVars = []string{
+	"ANTHROPIC_BASE_URL", "ANTHROPIC_AUTH_TOKEN", "ANTHROPIC_MODEL", "ANTHROPIC_SMALL_FAST_MODEL",
+	"ANTHROPIC_DEFAULT_HAIKU_MODEL", "ANTHROPIC_DEFAULT_SONNET_MODEL", "ANTHROPIC_DEFAULT_OPUS_MODEL",
+	"API_TIMEOUT_MS", "CLAUDECODE", "CLAUDE_CODE_ENTRYPOINT", "CLAUDE_CODE_SSE_PORT",
+}
+
+// DaemonEnv is the environment for a spawned daemon: the caller's, minus session redirects,
+// plus AMEM_DISABLE so CLI observers it runs do not trigger amem hooks.
+func DaemonEnv() []string {
+	return append(WithoutVars(os.Environ(), sessionVars), "AMEM_DISABLE=1")
+}
+
+// WithoutVars filters NAME=value entries.
+func WithoutVars(env []string, names []string) []string {
+	out := env[:0:0]
+	for _, kv := range env {
+		name, _, _ := strings.Cut(kv, "=")
+		if !slices.Contains(names, name) {
+			out = append(out, kv)
+		}
+	}
+	return out
 }

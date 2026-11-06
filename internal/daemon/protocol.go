@@ -13,6 +13,22 @@ import (
 // the daemon exit after answering, so the next hook starts the new binary.
 var Version = buildVersion()
 
+// BuildTime is the commit time of this build (RFC 3339, empty if unknown). The daemon only
+// gives way to a client built from a newer commit, never to an older binary still running in
+// a long-lived process (an `amem mcp` started before an upgrade).
+var BuildTime = buildTime()
+
+func buildTime() string {
+	if info, ok := debug.ReadBuildInfo(); ok {
+		for _, s := range info.Settings {
+			if s.Key == "vcs.time" {
+				return s.Value
+			}
+		}
+	}
+	return ""
+}
+
 const release = "0.1.0"
 
 func buildVersion() string {
@@ -49,7 +65,9 @@ type Request struct {
 	V       int    `json:"v"`
 	Version string `json:"version"`
 	// Exe is the client's binary; the daemon replaces itself only for its own binary.
-	Exe   string       `json:"exe,omitempty"`
+	Exe string `json:"exe,omitempty"`
+	// Built is the client's commit time (BuildTime).
+	Built string       `json:"built,omitempty"`
 	Op    string       `json:"op"`
 	Event *event.Event `json:"event,omitempty"`
 	// NoContext: the runtime cannot inject context for this hook, so skip recall (and do not

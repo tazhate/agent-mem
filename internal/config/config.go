@@ -98,6 +98,10 @@ type ProviderConfig struct {
 	Command []string `toml:"command"`
 	// MaxTokens caps the response for HTTP providers.
 	MaxTokens int `toml:"max_tokens"`
+	// EnvUnset removes variables from an exec provider's environment. Unset for a `claude`
+	// command, it defaults to the variables that would move the CLI off the user's
+	// subscription login (API key, base URL, model overrides).
+	EnvUnset []string `toml:"env_unset,omitempty"`
 }
 
 type EmbedConfig struct {

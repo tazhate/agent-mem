@@ -12,6 +12,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strings"
 	"syscall"
 	"time"
@@ -197,6 +198,15 @@ type execProvider struct {
 	name    string
 	command []string
 	model   string
+	unset   []string
+}
+
+// ClaudeSubscriptionUnset keeps `claude -p` on the user's own login: with any of these set it
+// would bill an API key or talk to another backend (z.ai, a proxy) with other model names.
+var ClaudeSubscriptionUnset = []string{
+	"ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN", "ANTHROPIC_BASE_URL", "ANTHROPIC_MODEL",
+	"ANTHROPIC_SMALL_FAST_MODEL", "ANTHROPIC_DEFAULT_HAIKU_MODEL", "ANTHROPIC_DEFAULT_SONNET_MODEL",
+	"ANTHROPIC_DEFAULT_OPUS_MODEL", "CLAUDECODE", "CLAUDE_CODE_ENTRYPOINT",
 }
 
 func (e *execProvider) Name() string { return e.name }
@@ -245,7 +255,11 @@ func (e *execProvider) Complete(ctx context.Context, req Request) (json.RawMessa
 	cmd.WaitDelay = 5 * time.Second
 	cmd.Stdin = strings.NewReader(prompt)
 	// The observer's own CLI session must not trigger amem hooks again.
-	cmd.Env = append(os.Environ(), "AMEM_DISABLE=1")
+	env := os.Environ()
+	if len(e.unset) > 0 {
+		env = withoutVars(env, e.unset)
+	}
+	cmd.Env = append(env, "AMEM_DISABLE=1")
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout, cmd.Stderr = &stdout, &stderr
 	if err := cmd.Run(); err != nil {
@@ -303,4 +317,15 @@ func mentions(body []byte, words ...string) bool {
 		}
 	}
 	return false
+}
+
+func withoutVars(env, names []string) []string {
+	out := env[:0:0]
+	for _, kv := range env {
+		name, _, _ := strings.Cut(kv, "=")
+		if !slices.Contains(names, name) {
+			out = append(out, kv)
+		}
+	}
+	return out
 }
