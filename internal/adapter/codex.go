@@ -54,3 +54,11 @@ func (codex) Render(ev *event.Event, hookArg string, context string) []byte {
 func (codex) CanInject(ev *event.Event, hookArg string) bool {
 	return codexContextEvents[firstNonEmpty(hookArg, hookNameFor(codexKinds, ev.Kind))]
 }
+
+func (a codex) RenderDisplay(ev *event.Event, hookArg string, context, display string) []byte {
+	name := firstNonEmpty(hookArg, hookNameFor(codexKinds, ev.Kind))
+	if display == "" || name != "SessionStart" {
+		return a.Render(ev, hookArg, context)
+	}
+	return hookSpecificWithMessage(name, context, display)
+}

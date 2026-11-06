@@ -77,10 +77,12 @@ type Request struct {
 }
 
 type Response struct {
-	V       int             `json:"v"`
-	OK      bool            `json:"ok"`
-	Error   string          `json:"error,omitempty"`
-	Context string          `json:"context,omitempty"`
+	V       int    `json:"v"`
+	OK      bool   `json:"ok"`
+	Error   string `json:"error,omitempty"`
+	Context string `json:"context,omitempty"`
+	// Display is a short note for the user (session-start summary), not for the model.
+	Display string          `json:"display,omitempty"`
 	Data    json.RawMessage `json:"data,omitempty"`
 }
 
