@@ -14,6 +14,7 @@ import (
 
 	"github.com/tazhate/agent-mem/internal/config"
 	"github.com/tazhate/agent-mem/internal/event"
+	"github.com/tazhate/agent-mem/internal/recall"
 	"github.com/tazhate/agent-mem/internal/redact"
 	"github.com/tazhate/agent-mem/internal/store"
 )
@@ -337,5 +338,15 @@ func TestStartSummaryDisplay(t *testing.T) {
 	_, display, _, err := s.ingest(t.Context(), &event.Event{Runtime: "claude-code", NativeSession: "d1", Cwd: repo, Kind: event.SessionStart, Source: "startup", ID: event.NewID()}, true)
 	if err != nil || !strings.Contains(display, "1 memories") || !strings.Contains(display, "запечатан") {
 		t.Fatalf("display: %v %q", err, display)
+	}
+	if !strings.Contains(display, "\x1b[") {
+		t.Fatalf("summary is not colored by default: %q", display)
+	}
+	plain := s.cfg.Recall
+	plain.StartSummaryColor = false
+	s.rec = recall.New(s.st, plain, nil)
+	_, display, _, err = s.ingest(t.Context(), &event.Event{Runtime: "claude-code", NativeSession: "d2", Cwd: repo, Kind: event.SessionStart, Source: "startup", ID: event.NewID()}, true)
+	if err != nil || display == "" || strings.Contains(display, "\x1b") {
+		t.Fatalf("plain display: %v %q", err, display)
 	}
 }

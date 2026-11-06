@@ -6,6 +6,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
+	"regexp"
 	"strings"
 	"unicode/utf8"
 
@@ -34,6 +35,16 @@ type Adapter interface {
 // to the model), e.g. a session-start summary.
 type Displayer interface {
 	RenderDisplay(ev *event.Event, hookArg string, context, display string) []byte
+}
+
+var ansiSeq = regexp.MustCompile(`\x1b\[[0-9;]*m`)
+
+// StripANSI removes color escapes, for runtimes that would print them literally.
+func StripANSI(s string) string {
+	if !strings.Contains(s, "\x1b") {
+		return s
+	}
+	return ansiSeq.ReplaceAllString(s, "")
 }
 
 var registry = map[string]Adapter{}

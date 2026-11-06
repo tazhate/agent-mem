@@ -81,6 +81,10 @@ type RecallConfig struct {
 	StartSummary bool `toml:"start_summary"`
 	// StartSummaryItems is how many recent memories the summary lists.
 	StartSummaryItems int `toml:"start_summary_items"`
+	// StartSummaryColor styles the summary with ANSI colors where the runtime renders them
+	// (Claude Code); other runtimes get plain text. NO_COLOR in the hook environment also
+	// turns it off.
+	StartSummaryColor bool `toml:"start_summary_color"`
 }
 
 type ObserverConfig struct {
@@ -148,6 +152,7 @@ func Default() *Config {
 			FatigueAfter:        10,
 			StartSummary:        true,
 			StartSummaryItems:   5,
+			StartSummaryColor:   true,
 		},
 		Observer: ObserverConfig{
 			Enabled:     true,

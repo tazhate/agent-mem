@@ -52,5 +52,6 @@ func (a gemini) RenderDisplay(ev *event.Event, hookArg string, context, display 
 	if display == "" || name != "SessionStart" {
 		return a.Render(ev, hookArg, context)
 	}
-	return hookSpecificWithMessage(name, context, display)
+	// Not confirmed to render ANSI in systemMessage, so show plain text.
+	return hookSpecificWithMessage(name, context, StripANSI(display))
 }
