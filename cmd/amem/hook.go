@@ -11,7 +11,6 @@ import (
 	"github.com/tazhate/agent-mem/internal/config"
 	"github.com/tazhate/agent-mem/internal/daemon"
 	"github.com/tazhate/agent-mem/internal/event"
-	"github.com/tazhate/agent-mem/internal/redact"
 )
 
 func init() {
@@ -80,7 +79,7 @@ func cmdHook(args []string) (code int) {
 		// Whatever went wrong (no daemon, crash mid-request, timeout), keep the event: the
 		// daemon drains the spool on start and drops duplicates by event id.
 		debugf("call: %v", err)
-		sanitize(cfg, ev)
+		daemon.Sanitize(cfg, ev)
 		if serr := daemon.SpoolAppend(cfg.SpoolPath(), ev); serr != nil {
 			debugf("spool: %v", serr)
 		}
@@ -115,23 +114,5 @@ func readStdin(timeout time.Duration) []byte {
 func debugf(format string, args ...any) {
 	if os.Getenv("AMEM_DEBUG") != "" {
 		fmt.Fprintf(os.Stderr, "amem hook: "+format+"\n", args...)
-	}
-}
-
-// sanitize applies capture cleaning before an event touches the disk spool, so secrets and
-// <private> blocks never sit on disk in clear text. A fully private prompt becomes empty,
-// which the daemon treats as a private turn.
-func sanitize(cfg *config.Config, ev *event.Event) {
-	r := redact.New(cfg.Capture.RedactGeneric)
-	fix := func(v string) string { return daemon.CleanText(r, cfg.Capture.Redact, v, cfg.Capture.MaxFieldChars) }
-	if redact.IsFullyPrivate(ev.Prompt) {
-		ev.Prompt = ""
-	} else {
-		ev.Prompt = fix(ev.Prompt)
-	}
-	ev.LastAssistant = fix(ev.LastAssistant)
-	if t := ev.Tool; t != nil {
-		t.Output, t.Error = fix(t.Output), fix(t.Error)
-		t.Input = daemon.CleanJSON(t.Input, fix)
 	}
 }

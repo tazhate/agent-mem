@@ -574,6 +574,17 @@ func (s *Store) Scrub(ctx context.Context, clean func(string) string, dryRun boo
 			return rep, err
 		}
 	}
+	// stem_df holds every indexed stem, including those of secrets just removed.
+	if rep.Memories > 0 && !dryRun {
+		if err := s.RebuildDF(ctx); err != nil {
+			return rep, err
+		}
+	}
+	if n, err := s.scrubPending(ctx, clean, dryRun); err != nil {
+		return rep, err
+	} else {
+		rep.Events += n
+	}
 	for _, t := range []struct {
 		table    string
 		cols     []string
@@ -629,7 +640,7 @@ func (s *Store) scrubTable(ctx context.Context, table string, cols []string, nul
 				var c string
 				if t := strings.TrimSpace(v); (strings.HasPrefix(t, "{") || strings.HasPrefix(t, "[")) && json.Valid([]byte(t)) {
 					c = string(redact.CleanJSON([]byte(v), clean))
-					if c == string(redact.CleanJSON([]byte(v), func(x string) string { return x })) {
+					if c == string(redact.NormalizeJSON([]byte(v))) {
 						c = v // nothing to redact: keep the original bytes and formatting
 					}
 				} else {
@@ -738,4 +749,37 @@ func (s *Store) Reindex(ctx context.Context) (int, error) {
 		return n, err
 	}
 	return n, s.SetMeta(ctx, "fts_version", ftsVersion)
+}
+
+// scrubPending cleans tool arguments kept by the transcript watcher for calls whose results
+// have not been seen yet.
+func (s *Store) scrubPending(ctx context.Context, clean func(string) string, dryRun bool) (int, error) {
+	rows, err := s.db.QueryContext(ctx, `SELECT path, pending FROM watch_state WHERE pending != '{}'`)
+	if err != nil {
+		return 0, err
+	}
+	type row struct{ path, pending string }
+	var changed []row
+	for rows.Next() {
+		var r row
+		if err := rows.Scan(&r.path, &r.pending); err != nil {
+			rows.Close()
+			return 0, err
+		}
+		if c := string(redact.CleanJSON([]byte(r.pending), clean)); c != string(redact.NormalizeJSON([]byte(r.pending))) {
+			changed = append(changed, row{r.path, c})
+		}
+	}
+	rows.Close()
+	if dryRun || len(changed) == 0 {
+		return len(changed), rows.Err()
+	}
+	return len(changed), s.Write(ctx, func(tx *sql.Tx) error {
+		for _, r := range changed {
+			if _, err := tx.ExecContext(ctx, `UPDATE watch_state SET pending = ? WHERE path = ?`, r.pending, r.path); err != nil {
+				return err
+			}
+		}
+		return nil
+	})
 }

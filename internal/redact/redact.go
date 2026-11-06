@@ -161,12 +161,23 @@ func hasDigit(s string) bool {
 	return false
 }
 
+// secretKey matches JSON field names whose string values are secrets.
+var secretKey = regexp.MustCompile(`(?i)(password|passwd|pwd|secret|token|api[_-]?key|apikey|access[_-]?key|private[_-]?key|authorization|credential)`)
+
 // CleanJSON applies fix to every string inside a JSON value. Strings are decoded first, so
 // escaped forms like \u003cprivate\u003e are seen as <private>, and a rule that runs to the
 // end of its text (a private key without END) stops at the end of that string instead of
 // eating the rest of the document. Output keeps < and > literal. Invalid JSON is cleaned as
 // plain text and re-encoded as a JSON string.
-func CleanJSON(raw []byte, fix func(string) string) []byte {
+func CleanJSON(raw []byte, fix func(string) string) []byte { return cleanJSON(raw, fix, true) }
+
+// NormalizeJSON re-encodes a JSON value the way CleanJSON does, without changing any value;
+// compare against it to tell whether cleaning changed anything.
+func NormalizeJSON(raw []byte) []byte {
+	return cleanJSON(raw, func(s string) string { return s }, false)
+}
+
+func cleanJSON(raw []byte, fix func(string) string, keyed bool) []byte {
 	if len(raw) == 0 {
 		return raw
 	}
@@ -184,6 +195,11 @@ func CleanJSON(raw []byte, fix func(string) string) []byte {
 			return fix(t)
 		case map[string]any:
 			for k, val := range t {
+				// Keyed rules need the field name: {"password": "x"} carries no "password=".
+				if str, ok := val.(string); ok && keyed && secretKey.MatchString(k) && len(str) >= 8 && hasLetter(str) && !strings.HasPrefix(str, "[REDACTED") {
+					t[k] = "[REDACTED:secret]"
+					continue
+				}
 				t[k] = walk(val)
 			}
 		case []any:

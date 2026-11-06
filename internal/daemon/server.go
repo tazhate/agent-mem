@@ -395,13 +395,14 @@ func (s *Server) ingest(ctx context.Context, ev *event.Event, live bool) (string
 			dup = seen
 			return err
 		}
-		turn, privTurn, err := s.st.TouchSession(ctx, tx, sid, ev.Runtime, ev.NativeSession, pid, ev.Cwd, ev.Model, ev.Kind == event.Prompt, ev.TS)
+		turn, privTurn, stale, err := s.st.TouchSession(ctx, tx, sid, ev.Runtime, ev.NativeSession, pid, ev.Cwd, ev.Model, ev.Kind == event.Prompt, ev.TS)
 		if err != nil {
 			return err
 		}
-		if ev.Kind == event.Prompt {
+		if ev.Kind == event.Prompt && (privatePrompt || !stale) {
 			// The whole turn of a fully private prompt stays out of storage, however the
-			// observer later slices batches.
+			// observer later slices batches. A late public prompt from the spool must not end
+			// a private turn that started after it.
 			privTurn = -1
 			if privatePrompt {
 				privTurn = turn
@@ -526,7 +527,8 @@ func (s *Server) clean(ev *event.Event) (privatePrompt bool) {
 
 // CleanText is the capture cleaning used by the daemon and by hooks before spooling.
 func CleanText(r *redact.Redactor, doRedact bool, v string, limit int) string {
-	v = Elide(v, limit)
+	// Private blocks first: elision could cut a block's opening tag and leave its content.
+	v = Elide(redact.StripTags(v), limit)
 	if doRedact {
 		return r.Clean(v)
 	}

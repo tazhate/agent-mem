@@ -72,3 +72,14 @@ func BenchmarkCleanTypical(b *testing.B) {
 		r.Clean(text)
 	}
 }
+
+func TestCleanJSONKeyedSecrets(t *testing.T) {
+	r := New(true)
+	out := string(CleanJSON([]byte(`{"password":"hunter2hunter2","nested":{"api_key":"abc12345def"},"note":"ok text","count":"12345678"}`), r.Clean))
+	if strings.Contains(out, "hunter2") || strings.Contains(out, "abc12345def") || !strings.Contains(out, "ok text") {
+		t.Fatalf("keyed JSON secrets: %s", out)
+	}
+	if string(NormalizeJSON([]byte(`{"password":"hunter2hunter2"}`))) != `{"password":"hunter2hunter2"}` {
+		t.Fatal("NormalizeJSON must not redact")
+	}
+}

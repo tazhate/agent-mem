@@ -234,10 +234,13 @@ func (x *Index) load(ctx context.Context) error {
 	// Vectors of another model cannot be compared with this one's; drop them once.
 	if err := x.st.Write(ctx, func(tx *sql.Tx) error {
 		res, err := tx.ExecContext(ctx, `DELETE FROM vectors WHERE model != ?`, x.emb.Model())
-		if n, _ := res.RowsAffected(); err == nil && n > 0 {
+		if err != nil {
+			return err
+		}
+		if n, _ := res.RowsAffected(); n > 0 {
 			x.log.Info("dropped vectors of a previous embedding model", "rows", n)
 		}
-		return err
+		return nil
 	}); err != nil {
 		return err
 	}

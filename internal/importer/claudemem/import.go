@@ -610,10 +610,10 @@ func (im *importer) work(ctx context.Context) error {
 	return im.write(ctx, func(tx *sql.Tx) error {
 		for _, w := range all {
 			var f map[string]any
-			if json.Unmarshal([]byte(w.fields), &f) != nil {
+			if json.Unmarshal(redact.CleanJSON([]byte(w.fields), im.opt.Clean), &f) != nil {
 				continue
 			}
-			created, err := store.AppendWorkTx(ctx, tx, im.proj[baseProject(w.project, "")], w.list, f, w.ts, origin, fmt.Sprint(w.id))
+			created, err := store.AppendWorkTx(ctx, tx, im.proj[baseProject(w.project, "")], im.opt.Clean(w.list), f, w.ts, origin, fmt.Sprint(w.id))
 			if err != nil {
 				return err
 			}
@@ -630,6 +630,18 @@ func (im *importer) raw(ctx context.Context) error {
 		return nil
 	}
 	since := max(im.opt.RawSince, 0)
+	// Tool uses of fully private turns are not imported at all.
+	private := map[string]bool{}
+	if rows, err := im.src.QueryContext(ctx, `SELECT content_session_id, prompt_number, prompt_text FROM user_prompts`); err == nil {
+		for rows.Next() {
+			var cs, text string
+			var n int
+			if rows.Scan(&cs, &n, &text) == nil && redact.IsFullyPrivate(text) {
+				private[fmt.Sprint(cs, "/", n)] = true
+			}
+		}
+		rows.Close()
+	}
 	var last int64
 	for {
 		rows, err := im.src.QueryContext(ctx, `SELECT id, content_session_id, tool_name, coalesce(tool_input,''), coalesce(tool_response,''),
@@ -663,12 +675,12 @@ func (im *importer) raw(ctx context.Context) error {
 		if err := im.dst.Write(ctx, func(tx *sql.Tx) error {
 			for _, t := range batch {
 				s, ok := im.byContent[t.content]
-				if !ok {
+				if !ok || private[fmt.Sprint(t.content, "/", t.turn)] {
 					continue
 				}
 				created, err := store.InsertReturning(ctx, tx, `INSERT INTO events(session_id, turn, kind, tool, input, output, ts, processed, origin, origin_id)
 					VALUES (?, ?, 'tool_post', ?, ?, ?, ?, 1, ?, ?) ON CONFLICT DO NOTHING`,
-					s.ID, t.turn, t.tool, im.opt.Clean(t.in), im.opt.Clean(t.out), t.ts, origin+":tool", fmt.Sprint(t.id))
+					s.ID, t.turn, t.tool, cleanMaybeJSON(t.in, im.opt.Clean), cleanMaybeJSON(t.out, im.opt.Clean), t.ts, origin+":tool", fmt.Sprint(t.id))
 				if err != nil {
 					return err
 				}
@@ -720,4 +732,13 @@ func cleanList(v []string, c func(string) string) []string {
 		v[i] = c(v[i])
 	}
 	return v
+}
+
+// cleanMaybeJSON cleans JSON values string by string (escaped tags decode first) and plain
+// text as a whole.
+func cleanMaybeJSON(v string, c func(string) string) string {
+	if t := strings.TrimSpace(v); (strings.HasPrefix(t, "{") || strings.HasPrefix(t, "[")) && json.Valid([]byte(t)) {
+		return string(redact.CleanJSON([]byte(v), c))
+	}
+	return c(v)
 }

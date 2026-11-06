@@ -109,11 +109,17 @@ func (s *Store) HasEvent(ctx context.Context, tx *sql.Tx, id string) (bool, erro
 	return n > 0, err
 }
 
-// TouchSession creates the session on first sight and returns its current turn number and the
-// turn marked private (-1 if none). A prompt event opens a new turn.
-func (s *Store) TouchSession(ctx context.Context, tx *sql.Tx, id, runtime, native string, projectID int64, cwd, model string, newTurn bool, ts int64) (int, int, error) {
+// TouchSession creates the session on first sight and returns its current turn number, the
+// turn marked private (-1 if none), and whether the event is older than the newest one already
+// seen (a late delivery from the spool). A prompt event opens a new turn.
+func (s *Store) TouchSession(ctx context.Context, tx *sql.Tx, id, runtime, native string, projectID int64, cwd, model string, newTurn bool, ts int64) (int, int, bool, error) {
+	var prev sql.NullInt64
+	if err := tx.QueryRowContext(ctx, `SELECT last_event_at FROM sessions WHERE id = ?`, id).Scan(&prev); err != nil && !errors.Is(err, sql.ErrNoRows) {
+		return 0, 0, false, err
+	}
+	stale := prev.Valid && ts < prev.Int64
 	inc := 0
-	if newTurn {
+	if newTurn && !stale { // a late prompt joins the current turn instead of opening one
 		inc = 1
 	}
 	var turn, priv int
@@ -121,12 +127,12 @@ func (s *Store) TouchSession(ctx context.Context, tx *sql.Tx, id, runtime, nativ
 		VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?8)
 		ON CONFLICT(id) DO UPDATE SET
 			turn = sessions.turn + ?7,
-			last_event_at = ?8,
+			last_event_at = max(sessions.last_event_at, ?8),
 			project_id = coalesce(sessions.project_id, excluded.project_id),
 			cwd = coalesce(sessions.cwd, excluded.cwd),
 			model = coalesce(excluded.model, sessions.model)
 		RETURNING turn, private_turn`, id, runtime, native, projectID, nullStr(cwd), nullStr(model), inc, ts).Scan(&turn, &priv)
-	return turn, priv, err
+	return turn, priv, stale, err
 }
 
 // SetPrivateTurn records which turn of a session is private (-1 clears it).
