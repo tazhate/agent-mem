@@ -4,6 +4,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"slices"
 	"syscall"
 	"testing"
 
@@ -36,24 +37,33 @@ func TestSpoolRecoversAbandonedDrains(t *testing.T) {
 	}
 }
 
-func TestSpoolRespoolsFailures(t *testing.T) {
+func TestSpoolStopsAtFailure(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "spool.jsonl")
 	for _, id := range []string{"ok1", "bad", "ok2"} {
-		SpoolAppend(path, ev(id))
+		e := ev(id)
+		e.Prompt = "<private>" + id + "</private>"
+		SpoolAppend(path, e)
 	}
 	n, err := SpoolDrain(path, func(e *event.Event) error {
+		e.Prompt = "" // cleaning mutates the event; the retry must see the original
 		if e.ID == "bad" {
 			return errors.New("busy")
 		}
 		return nil
 	})
-	if n != 2 || err == nil {
+	if n != 1 || err == nil {
 		t.Fatalf("n=%d err=%v", n, err)
 	}
 	var again []string
-	SpoolDrain(path, func(e *event.Event) error { again = append(again, e.ID); return nil })
-	if len(again) != 1 || again[0] != "bad" {
-		t.Fatalf("failed event not retried: %v", again)
+	SpoolDrain(path, func(e *event.Event) error {
+		if e.Prompt == "" {
+			t.Fatalf("retried event lost its prompt: %+v", e)
+		}
+		again = append(again, e.ID)
+		return nil
+	})
+	if !slices.Equal(again, []string{"bad", "ok2"}) {
+		t.Fatalf("retry order: %v", again)
 	}
 }
 
@@ -69,5 +79,21 @@ func TestSpoolSideFileWhenLocked(t *testing.T) {
 	SpoolDrain(path, func(e *event.Event) error { got = append(got, e.ID); return nil })
 	if len(got) != 1 || got[0] != "side" {
 		t.Fatalf("side file not drained: %v", got)
+	}
+}
+
+func TestLeftoversOldestFirst(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "spool.jsonl")
+	for _, n := range []string{"spool.jsonl.side-10001-300.jsonl", "spool.jsonl.9999-200.draining", "spool.jsonl.10001-100.draining"} {
+		os.WriteFile(filepath.Join(dir, n), nil, 0o600)
+	}
+	var got []string
+	for _, f := range leftovers(path) {
+		got = append(got, filepath.Base(f))
+	}
+	want := []string{"spool.jsonl.10001-100.draining", "spool.jsonl.9999-200.draining", "spool.jsonl.side-10001-300.jsonl"}
+	if !slices.Equal(got, want) {
+		t.Fatalf("order: %v", got)
 	}
 }

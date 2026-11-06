@@ -56,7 +56,9 @@ const genericValue = `[A-Za-z0-9_.\-+/=~@#$%^*!?]{8,}`
 var specific = []rule{
 	// A key without its END line (e.g. `head id_rsa`) is masked to the end of the text.
 	{name: "private_key", re: regexp.MustCompile(`(?s)-----BEGIN [A-Z ]*PRIVATE KEY(?: BLOCK)?-----.*?(?:-----END [A-Z ]*PRIVATE KEY(?: BLOCK)?-----|\z)`), hints: []string{"private key"}},
-	{name: "url_password", re: regexp.MustCompile(`(?i)(\b[a-z][a-z0-9+.-]{1,20}://[^/\s:@'"]{1,128}:)([^@\s/'"]{3,256})@`), group: 2, hints: []string{"://"}},
+	// The user may be empty (redis://:pass@host) and the password may hold "@": the last "@"
+	// before the host ends it.
+	{name: "url_password", re: regexp.MustCompile(`(?i)(\b[a-z][a-z0-9+.-]{1,20}://[^/\s:@'"]{0,128}:)([^\s/'"]{3,256})@`), group: 2, hints: []string{"://"}},
 	{name: "aws_access_key", re: regexp.MustCompile(`\b(?:AKIA|ASIA)[0-9A-Z]{16}\b`), hints: []string{"akia", "asia"}},
 	{name: "aws_secret_key", re: regexp.MustCompile(`(?i)((?:aws_secret_access_key|secretaccesskey)["']?\s{0,8}[=:]\s{0,8}["']?)([A-Za-z0-9/+=]{40})`), group: 2, hints: []string{"secretaccesskey", "secret_access_key"}},
 	{name: "azure_key", re: regexp.MustCompile(`(?i)((?:AccountKey|SharedAccessKey)=)([A-Za-z0-9+/=]{20,})`), group: 2, hints: []string{"accountkey", "sharedaccesskey"}},
@@ -72,11 +74,18 @@ var specific = []rule{
 	{name: "stripe_key", re: regexp.MustCompile(`\b(?:sk|pk|rk)_(?:live|test)_[A-Za-z0-9]{24,}\b`), hints: []string{"_live_", "_test_"}},
 	{name: "google_api_key", re: regexp.MustCompile(`\bAIza[0-9A-Za-z_-]{35}`), hints: []string{"aiza"}},
 	{name: "vault_token", re: regexp.MustCompile(`\bhv[sbr]\.[A-Za-z0-9_-]{20,}`), hints: []string{"hvs.", "hvb.", "hvr."}},
+	{name: "google_oauth_secret", re: regexp.MustCompile(`\bGOCSPX-[A-Za-z0-9_-]{20,}`), hints: []string{"gocspx-"}},
+	{name: "sendgrid_key", re: regexp.MustCompile(`\bSG\.[A-Za-z0-9_-]{16,}\.[A-Za-z0-9_-]{16,}`), hints: []string{"sg."}},
+	{name: "digitalocean_token", re: regexp.MustCompile(`\bdo[opr]_v1_[a-f0-9]{64}\b`), hints: []string{"_v1_"}},
 	{name: "bearer_token", re: regexp.MustCompile(`(?i)(authorization["']?\s{0,8}:\s{0,8}["']?(?:bearer|basic|token)\s{1,8})(` + genericValue + `)`), group: 2, hints: []string{"authorization"}},
 }
 
 var generic = []rule{
-	{name: "secret", re: regexp.MustCompile(`(?i)(\b[\w-]*(?:password|passwd|pwd|secret|token|api[_-]?key|apikey|access[_-]?key|private[_-]?key)["']?\s{0,8}[=:]\s{0,8}["']?)(` + genericValue + `)`), group: 2, needLetter: true, hints: []string{"password", "passwd", "pwd", "secret", "token", "key"}},
+	// Quotes may be backslash-escaped: JSON embedded in a JSON string or a log line.
+	{name: "secret", re: regexp.MustCompile(`(?i)(\b[\w-]*(?:password|passwd|pwd|secret|token|api[_-]?key|apikey|access[_-]?key|private[_-]?key)(?:\\?["'])?\s{0,8}[=:]\s{0,8}(?:\\?["'])?)(` + genericValue + `)`), group: 2, needLetter: true, hints: []string{"password", "passwd", "pwd", "secret", "token", "key"}},
+	// curl -u user:pass, wget --user user:pass. Tied to the command: -u means a uid:gid or a
+	// path elsewhere (docker run -u postgres:postgres, rsync -u host:/srv).
+	{name: "user_flag", re: regexp.MustCompile(`(?i)(\b(?:curl|wget)\b[^\n]*?\s(?:-u|--user)[= ]\s{0,4}["']?[^\s:'"/]{1,64}:)([^\s'"/][^\s'"]{2,255})`), group: 2, needLetter: true, hints: []string{"curl", "wget"}},
 	{name: "secret_flag", re: regexp.MustCompile(`(?i)(--(?:token|password|passwd|api-key|apikey|secret)[= ]["']?)(` + genericValue + `)`), group: 2, needLetter: true, hints: []string{"--token", "--password", "--passwd", "--api-key", "--apikey", "--secret"}},
 }
 

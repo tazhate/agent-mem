@@ -11,7 +11,10 @@ import (
 
 // Injected returns ids already shown in a session (real or shadow), for dedupe.
 func (s *Store) Injected(ctx context.Context, sessionID string) (map[int64]bool, int, error) {
-	rows, err := s.db.QueryContext(ctx, `SELECT memory_id, tokens FROM injections WHERE session_id = ?`, sessionID)
+	// Only injections since the last compaction count: older ones are gone from the model's
+	// context, so they may be shown again and no longer use up the session budget.
+	rows, err := s.db.QueryContext(ctx, `SELECT memory_id, tokens FROM injections WHERE session_id = ? AND memory_id != 0
+		AND id > coalesce((SELECT max(id) FROM injections WHERE session_id = ? AND memory_id = 0), 0)`, sessionID, sessionID)
 	if err != nil {
 		return nil, 0, err
 	}
@@ -35,6 +38,9 @@ type Injection struct {
 	Tokens   int
 }
 
+// CompactMarker is an injection row with this memory id, recorded when a session is compacted.
+const CompactMarker int64 = 0
+
 // RecordInjections logs what recall returned; real injections also bump inject_count.
 func (s *Store) RecordInjections(ctx context.Context, sessionID, trigger string, items []Injection, shadow bool) error {
 	if len(items) == 0 {
@@ -47,7 +53,7 @@ func (s *Store) RecordInjections(ctx context.Context, sessionID, trigger string,
 				VALUES (?, ?, ?, ?, ?, ?)`, sessionID, it.MemoryID, trigger, it.Tokens, now, shadow); err != nil {
 				return err
 			}
-			if !shadow {
+			if !shadow && it.MemoryID != CompactMarker {
 				if _, err := tx.ExecContext(ctx, `UPDATE memories SET inject_count = inject_count + 1 WHERE id = ?`, it.MemoryID); err != nil {
 					return err
 				}
@@ -139,7 +145,7 @@ type ShadowRow struct {
 func (s *Store) ShadowLog(ctx context.Context, since int64, limit int) ([]ShadowRow, error) {
 	rows, err := s.db.QueryContext(ctx, `SELECT i.session_id, i.trigger, i.memory_id, coalesce(m.title, ''), i.ts
 		FROM injections i LEFT JOIN memories m ON m.id = i.memory_id
-		WHERE i.shadow = 1 AND i.ts >= ? ORDER BY i.ts DESC LIMIT ?`, since, limit)
+		WHERE i.shadow = 1 AND i.memory_id != 0 AND i.ts >= ? ORDER BY i.ts DESC LIMIT ?`, since, limit)
 	if err != nil {
 		return nil, err
 	}

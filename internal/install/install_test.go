@@ -47,8 +47,11 @@ func TestClaudeInstallIdempotentAndReversible(t *testing.T) {
 	if ch[0].Before != ch[0].After {
 		t.Fatalf("second install not idempotent:\n%s", Diff(ch[0]))
 	}
-	if !Installed(o)["claude-code"] {
+	if Installed(o)["claude-code"] != HooksCurrent {
 		t.Fatal("Installed() does not see it")
+	}
+	if moved := o; Installed(func() Options { moved.Binary = "/elsewhere/amem"; return moved }())["claude-code"] != HooksStale {
+		t.Fatal("hooks of another binary not reported stale")
 	}
 	if _, err := Run(o, "claude-code", true); err != nil {
 		t.Fatal(err)
@@ -120,7 +123,7 @@ func TestOtherRuntimes(t *testing.T) {
 	}
 	inst := Installed(o)
 	for _, rt := range []string{"gemini", "cursor", "opencode"} {
-		if !inst[rt] {
+		if inst[rt] != HooksCurrent {
 			t.Fatalf("%s not detected as installed: %v", rt, inst)
 		}
 	}
@@ -211,3 +214,32 @@ func TestClaudeForeignMCPLeftAlone(t *testing.T) {
 }
 
 func mustObj(s string) *object { o, _ := parseObject(s); return o }
+
+func TestMergeHooksKeepsForeignShapes(t *testing.T) {
+	o := Options{Binary: "/usr/local/bin/amem"}
+	raw := `{"hooks": {"enabled": true, "notifications": {"x": 1},
+  "SessionStart": [{"matcher": "x"}, {"hooks": [{"type": "command", "command": "/opt/amem-fork/bin/notify hook gemini-audit"}]}]}}`
+	out, err := mergeHooks(raw, "gemini", nil, o, 1000, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{`"enabled": true`, `"notifications"`, `"matcher": "x"`, "gemini-audit"} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("lost %s:\n%s", want, out)
+		}
+	}
+	if strings.Contains(out, "null") {
+		t.Fatalf("wrote null hooks:\n%s", out)
+	}
+	if !isOurs("'/home/u/my bin/amem' hook gemini SessionStart", "gemini") || isOurs("/usr/bin/amem hook gemini-audit", "gemini") {
+		t.Fatal("isOurs boundaries")
+	}
+}
+
+func TestDropTables(t *testing.T) {
+	in := "model = \"x\"\n\n[mcp_servers.amem.tools.memory_save]\napproval_mode = \"approve\"\n\n[mcp_servers.other]\ncommand = \"o\"\n"
+	got := dropTables(in, "[mcp_servers.amem.")
+	if strings.Contains(got, "amem") || !strings.Contains(got, "[mcp_servers.other]") || !strings.Contains(got, `model = "x"`) {
+		t.Fatalf("dropTables:\n%s", got)
+	}
+}

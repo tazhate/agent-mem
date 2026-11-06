@@ -323,7 +323,7 @@ type Scope struct {
 	// Since drops memories created before this unix ms time.
 	Since int64
 	// Fatigue drops memories shown at least this many times without ever being used
-	// (automatic recall only; 0 = off).
+	// (automatic recall only; 0 = off). Decisions and preferences are exempt.
 	Fatigue int
 }
 
@@ -334,6 +334,31 @@ func (sc Scope) where(args *[]any) string {
 		b.WriteString(` AND (m.project_id = ? OR m.project_id IS NULL)`)
 		*args = append(*args, sc.ProjectID)
 	}
+	sc.filters(&b, args)
+	return b.String()
+}
+
+// top selects the ids of the first limit memories in scope by order. A project scope is split
+// into the project's and the global memories, so each side walks an index in order instead
+// of the OR reading every row of the project and sorting them.
+func (sc Scope) top(order string, limit int, args *[]any) string {
+	branch := func(project string) string {
+		var b strings.Builder
+		b.WriteString(`SELECT id FROM (SELECT m.id FROM memories m WHERE m.private = 0 AND m.superseded_by IS NULL` + project)
+		sc.filters(&b, args)
+		b.WriteString(` ORDER BY ` + order + ` LIMIT ?)`)
+		*args = append(*args, limit)
+		return b.String()
+	}
+	if sc.All {
+		return ` m.id IN (` + branch("") + `)`
+	}
+	*args = append(*args, sc.ProjectID)
+	mine := branch(` AND m.project_id = ?`)
+	return ` m.id IN (` + mine + ` UNION ALL ` + branch(` AND m.project_id IS NULL`) + `)`
+}
+
+func (sc Scope) filters(b *strings.Builder, args *[]any) {
 	if len(sc.Types) > 0 {
 		b.WriteString(` AND m.type IN (`)
 		for i, t := range sc.Types {
@@ -350,10 +375,11 @@ func (sc Scope) where(args *[]any) string {
 		*args = append(*args, sc.Since)
 	}
 	if sc.Fatigue > 0 {
-		b.WriteString(` AND NOT (m.inject_count >= ? AND m.use_count = 0)`)
+		// Decisions and preferences are rules the agent follows without fetching or citing them,
+		// so a zero use count says nothing about them; Durable's ordering already rotates them.
+		b.WriteString(` AND (m.type IN ('decision', 'preference') OR NOT (m.inject_count >= ? AND m.use_count = 0))`)
 		*args = append(*args, sc.Fatigue)
 	}
-	return b.String()
 }
 
 // SearchFTS runs an OR query over stems, title weighted 3x.
@@ -385,7 +411,7 @@ func (s *Store) SearchFTS(ctx context.Context, stems []string, sc Scope, limit i
 	return out, rows.Err()
 }
 
-// ByFiles returns live memories that mention any of the paths (exact or same basename suffix).
+// ByFiles returns live memories that mention any of the paths (exact, or the same dir/base suffix).
 func (s *Store) ByFiles(ctx context.Context, paths []string, sc Scope, limit int) ([]*Memory, error) {
 	if len(paths) == 0 {
 		return nil, nil
@@ -393,10 +419,25 @@ func (s *Store) ByFiles(ctx context.Context, paths []string, sc Scope, limit int
 	args := []any{}
 	var cond []string
 	for _, p := range paths {
-		cond = append(cond, `f.path = ? OR f.base = ?`)
-		args = append(args, p, filepath.Base(p))
+		// Same file in another checkout or worktree: the base name plus its directory must
+		// match, so one main.go does not pull in memories about every other main.go.
+		suffix := filepath.Join(filepath.Base(filepath.Dir(p)), filepath.Base(p))
+		if d := filepath.Dir(p); d == "." || d == "/" {
+			suffix = filepath.Base(p)
+		}
+		// A bare stored name (Makefile, AGENTS.md) is a top-level file: it matches by name.
+		cond = append(cond, `f.path = ? OR (f.base = ? AND (f.path = f.base OR f.path = ? OR substr(f.path, -length(?)) = ?))`)
+		args = append(args, p, filepath.Base(p), suffix, "/"+suffix, "/"+suffix)
 	}
-	where := sc.where(&args)
+	// Start from the matching files, not from the project's rows: a project condition the
+	// planner cannot use an index for keeps it from walking the whole project.
+	all := sc
+	all.All = true
+	where := all.where(&args)
+	if !sc.All {
+		where += ` AND ifnull(m.project_id, ?) = ?`
+		args = append(args, sc.ProjectID, sc.ProjectID)
+	}
 	args = append(args, limit)
 	return s.queryMemories(ctx, `WHERE m.id IN (SELECT f.memory_id FROM memory_files f WHERE `+strings.Join(cond, " OR ")+`)
 		AND`+where+` ORDER BY m.created_at DESC LIMIT ?`, args...)
@@ -405,19 +446,20 @@ func (s *Store) ByFiles(ctx context.Context, paths []string, sc Scope, limit int
 // Durable returns the most useful long-lived memories of a project (decisions, gotchas, preferences).
 func (s *Store) Durable(ctx context.Context, sc Scope, limit int) ([]*Memory, error) {
 	sc.Types = []string{"decision", "gotcha", "preference"}
+	const order = `(m.use_count * 3 - max(0, m.inject_count - m.use_count)) DESC, m.created_at DESC`
 	args := []any{}
-	where := sc.where(&args)
+	pick := sc.top(order, limit, &args)
 	args = append(args, limit)
-	return s.queryMemories(ctx, `WHERE`+where+`
-		ORDER BY (m.use_count * 3 - max(0, m.inject_count - m.use_count)) DESC, m.created_at DESC LIMIT ?`, args...)
+	return s.queryMemories(ctx, `WHERE`+pick+` ORDER BY `+order+` LIMIT ?`, args...)
 }
 
 // Recent returns the newest memories in scope.
 func (s *Store) Recent(ctx context.Context, sc Scope, limit int) ([]*Memory, error) {
+	const order = `m.created_at DESC`
 	args := []any{}
-	where := sc.where(&args)
+	pick := sc.top(order, limit, &args)
 	args = append(args, limit)
-	return s.queryMemories(ctx, `WHERE`+where+` ORDER BY m.created_at DESC LIMIT ?`, args...)
+	return s.queryMemories(ctx, `WHERE`+pick+` ORDER BY `+order+` LIMIT ?`, args...)
 }
 
 // SessionMemories returns memories produced in a session, newest first.

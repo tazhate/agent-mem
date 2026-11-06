@@ -8,12 +8,17 @@ import (
 	"github.com/tazhate/agent-mem/internal/daemon"
 	"github.com/tazhate/agent-mem/internal/embed"
 	"github.com/tazhate/agent-mem/internal/observer"
+	"github.com/tazhate/agent-mem/internal/redact"
 )
 
 // attachWorkers wires background workers into the daemon.
 func attachWorkers(cfg *config.Config, srv *daemon.Server, log *slog.Logger) {
 	if cfg.Observer.Enabled {
-		srv.AddWorker(observer.New(srv.Store(), cfg.Observer, srv.Recall(), log.With("worker", "observer")))
+		obs := observer.New(srv.Store(), cfg.Observer, srv.Recall(), log.With("worker", "observer"))
+		if cfg.Capture.Redact {
+			obs.SetRedactor(redact.New(cfg.Capture.RedactGeneric))
+		}
+		srv.AddWorker(obs)
 	}
 	emb, err := embed.NewEmbedder(context.Background(), cfg.Embed, cfg.ModelsDir())
 	if err != nil {

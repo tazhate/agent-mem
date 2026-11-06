@@ -56,6 +56,10 @@ type Server struct {
 	mu       sync.Mutex
 	projects map[string]int64 // project key -> id
 	adopted  map[int64]bool
+
+	// drainMu serializes spool drains (startup, ticker, before live events).
+	drainMu    sync.Mutex
+	drainFails map[string]time.Time // event id -> first failed drain
 }
 
 // New prepares a server; callers attach workers before Run.
@@ -183,10 +187,37 @@ func (s *Server) Run(ctx context.Context, foreground bool) error {
 	return nil
 }
 
+// drainGiveUp is how long a spooled event may keep failing before it is dropped, so one event
+// that can never be stored does not hold up the spool behind it forever. It is a duration, not
+// a pass count: drains run on every live event, and most failures (disk full, a held write
+// lock) are about the database, not the event.
+const drainGiveUp = 15 * time.Minute
+
 func (s *Server) drainSpool(ctx context.Context) {
+	s.drainMu.Lock()
+	defer s.drainMu.Unlock()
 	n, err := SpoolDrain(s.cfg.SpoolPath(), func(ev *event.Event) error {
 		_, _, _, err := s.ingest(ctx, ev, false)
-		return err
+		if err == nil || ctx.Err() != nil {
+			delete(s.drainFails, ev.ID)
+			return err
+		}
+		if s.drainFails == nil {
+			s.drainFails = map[string]time.Time{}
+		}
+		first, ok := s.drainFails[ev.ID]
+		if !ok {
+			s.drainFails[ev.ID] = time.Now()
+			return err
+		}
+		// A private prompt is never dropped: without it the rest of its turn would be stored
+		// as public.
+		if time.Since(first) < drainGiveUp || (ev.Kind == event.Prompt && ev.Prompt == PrivateMarker) {
+			return err
+		}
+		delete(s.drainFails, ev.ID)
+		s.log.Error("spooled event dropped", "id", ev.ID, "kind", ev.Kind, "err", err)
+		return nil
 	})
 	if err != nil {
 		s.log.Error("spool drain", "err", err)
@@ -311,6 +342,11 @@ func (s *Server) handle(ctx context.Context, req *Request) (Response, func()) {
 		if req.Event == nil {
 			err = errors.New("missing event")
 			break
+		}
+		// Events a hook spooled earlier (say, a private prompt whose hook timed out) go first,
+		// so this event is judged with its turn's state already known.
+		if SpoolPending(s.cfg.SpoolPath()) {
+			s.drainSpool(ctx)
 		}
 		resp.Context, resp.Display, after, err = s.ingest(ctx, req.Event, !req.NoContext)
 	default:
@@ -501,6 +537,10 @@ func toRow(ev *event.Event, sid string, turn int) store.EventRow {
 	return row
 }
 
+// transcriptFreshMS is how old a turn end may be for the daemon to still read its answer
+// from the transcript.
+const transcriptFreshMS = 30_000
+
 // clean trims oversized fields, then strips private blocks and masks secrets. It reports
 // whether the prompt was entirely private. Trimming first keeps redaction cost bounded on
 // multi-megabyte tool outputs.
@@ -513,7 +553,9 @@ func (s *Server) clean(ev *event.Event) (privatePrompt bool) {
 			ev.Prompt = fix(ev.Prompt)
 		}
 	}
-	if ev.Kind == event.TurnEnd && ev.LastAssistant == "" && ev.TranscriptPath != "" {
+	// Only for fresh events: a turn end replayed from the spool would read the transcript as it
+	// is now, i.e. a later (possibly private) turn's answer. Hooks fill it before spooling.
+	if ev.Kind == event.TurnEnd && ev.LastAssistant == "" && ev.TranscriptPath != "" && event.NowMS()-ev.TS < transcriptFreshMS {
 		ev.LastAssistant = adapter.LastAssistantFromTranscript(ev.TranscriptPath)
 	}
 	ev.LastAssistant = fix(ev.LastAssistant)
@@ -528,11 +570,17 @@ func (s *Server) clean(ev *event.Event) (privatePrompt bool) {
 // CleanText is the capture cleaning used by the daemon and by hooks before spooling.
 func CleanText(r *redact.Redactor, doRedact bool, v string, limit int) string {
 	// Private blocks first: elision could cut a block's opening tag and leave its content.
-	v = Elide(redact.StripTags(v), limit)
-	if doRedact {
-		return r.Clean(v)
+	v = redact.StripTags(v)
+	if !doRedact {
+		return Elide(v, limit)
 	}
-	return redact.StripTags(v)
+	// Redact before the final cut, or a cut through a private key's BEGIN line leaves the rest
+	// of the key unmatched. The wide pre-cut only bounds redaction cost: its cut points fall
+	// in the part the final elision drops anyway.
+	if limit > 0 {
+		v = Elide(v, 4*limit)
+	}
+	return Elide(r.Clean(v), limit)
 }
 
 // CleanJSON applies fix to every string inside a JSON value (see redact.CleanJSON).

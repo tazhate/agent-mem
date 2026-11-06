@@ -84,3 +84,28 @@ func TestWatcherReplayIsStableAndResumesPending(t *testing.T) {
 		t.Fatalf("replay ids differ: %v vs %s", got, first)
 	}
 }
+
+func TestClaudeSkipsSidechainAndHarnessText(t *testing.T) {
+	home := t.TempDir()
+	dir := filepath.Join(home, ".claude", "projects", "-r")
+	os.MkdirAll(filepath.Join(dir, "s1", "subagents"), 0o755)
+	main := `{"type":"user","sessionId":"s1","cwd":"/r","message":{"role":"user","content":"fix the build"}}
+{"type":"user","sessionId":"s1","cwd":"/r","message":{"role":"user","content":"<task-notification><task-id>x</task-id></task-notification>"}}
+{"type":"user","sessionId":"s1","cwd":"/r","message":{"role":"user","content":[{"type":"text","text":"<command-name>/clear</command-name>"}]}}
+{"type":"user","sessionId":"s1","cwd":"/r","isCompactSummary":true,"message":{"role":"user","content":"This session is being continued"}}
+`
+	sub := `{"type":"user","sessionId":"s1","isSidechain":true,"cwd":"/r","message":{"role":"user","content":"subagent task"}}
+`
+	os.WriteFile(filepath.Join(dir, "s1.jsonl"), []byte(main), 0o644)
+	os.WriteFile(filepath.Join(dir, "s1", "subagents", "agent-a.jsonl"), []byte(sub), 0o644)
+	st, _ := store.Open(filepath.Join(t.TempDir(), "w.db"))
+	defer st.Close()
+	var got []string
+	w := New(st, Presets["claude"], home, func(e *event.Event) error { got = append(got, e.Prompt); return nil })
+	if err := w.Run(t.Context(), 0, true); err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 1 || got[0] != "fix the build" {
+		t.Fatalf("prompts: %q", got)
+	}
+}

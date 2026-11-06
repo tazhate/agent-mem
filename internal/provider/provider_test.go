@@ -3,6 +3,7 @@ package provider
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -172,5 +173,50 @@ echo '{"type":"result","is_error":false,"structured_output":{"ok":true}}'
 	p, _ := New(t.Context(), config.ProviderConfig{Kind: "exec", Command: []string{script}})
 	if out, err := p.Complete(t.Context(), Request{Schema: schema}); err != nil || string(out) != `{"ok":true}` {
 		t.Fatalf("%s %v", out, err)
+	}
+}
+
+func TestAccountTruncationAndMaxTokens(t *testing.T) {
+	var status atomic.Int32
+	var sentMax atomic.Int64
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var req struct {
+			MaxTokens int64 `json:"max_tokens"`
+		}
+		json.NewDecoder(r.Body).Decode(&req)
+		sentMax.Store(req.MaxTokens)
+		if code := int(status.Load()); code != 200 {
+			w.WriteHeader(code)
+			w.Write([]byte(`{"error":{"message":"invalid x-api-key"}}`))
+			return
+		}
+		w.Write([]byte(`{"content":[{"type":"text","text":"{\"ok\":"}],"stop_reason":"max_tokens"}`))
+	}))
+	defer srv.Close()
+	p, _ := New(t.Context(), config.ProviderConfig{Kind: "anthropic", BaseURL: srv.URL, MaxTokens: 50})
+	status.Store(401)
+	_, err := p.Complete(t.Context(), Request{Schema: schema, MaxTokens: 4096})
+	if pe, ok := errors.AsType[*Error](err); !ok || !pe.Retryable {
+		t.Fatalf("401 must keep the batch (retryable): %v", err)
+	}
+	if sentMax.Load() != 50 {
+		t.Fatalf("config max_tokens ignored: sent %d", sentMax.Load())
+	}
+	status.Store(200)
+	_, err = p.Complete(t.Context(), Request{Schema: schema})
+	if pe, ok := errors.AsType[*Error](err); !ok || pe.Retryable || !errors.Is(err, errTruncated) {
+		t.Fatalf("truncated output must be permanent: %v", err)
+	}
+}
+
+func TestExecLingeringChildKeepsAnswer(t *testing.T) {
+	dir := t.TempDir()
+	script := filepath.Join(dir, "linger")
+	// Answers and exits 0, but a background child keeps stdout open past WaitDelay.
+	os.WriteFile(script, []byte("#!/bin/sh\necho '{\"ok\":true}'\nsleep 30 &\nexit 0\n"), 0o755)
+	p, _ := New(t.Context(), config.ProviderConfig{Kind: "exec", Command: []string{script}})
+	out, err := p.Complete(t.Context(), Request{Schema: schema})
+	if err != nil || !strings.Contains(string(out), "ok") {
+		t.Fatalf("answer lost: %v %s", err, out)
 	}
 }

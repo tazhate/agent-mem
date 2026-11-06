@@ -4,6 +4,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -216,5 +217,49 @@ func TestClosedListHidesOpenTasks(t *testing.T) {
 	s.AppendWork(ctx, pid, "release", map[string]any{"status": "dropped"})
 	if lists, _ := s.WorkLists(ctx, pid, "", false); len(lists) != 0 {
 		t.Fatalf("dropped list still shown: %+v", lists)
+	}
+}
+
+func TestScopedQueries(t *testing.T) {
+	s := open(t)
+	ctx := t.Context()
+	pid, _ := s.EnsureProject(ctx, "k", "p", "")
+	other, _ := s.EnsureProject(ctx, "o", "o", "")
+	same, _, _ := s.InsertMemory(ctx, &Memory{ProjectID: pid, Type: "gotcha", Title: "same file elsewhere", Files: []string{"/old/checkout/cmd/x/main.go"}})
+	s.InsertMemory(ctx, &Memory{ProjectID: pid, Type: "gotcha", Title: "another main.go", Files: []string{"cmd/y/main.go"}})
+	global, _, _ := s.InsertMemory(ctx, &Memory{Type: "preference", Title: "global rule", Files: []string{"x/main.go"}})
+	top, _, _ := s.InsertMemory(ctx, &Memory{ProjectID: pid, Type: "gotcha", Title: "makefile target", Files: []string{"Makefile"}})
+	uni, _, _ := s.InsertMemory(ctx, &Memory{ProjectID: pid, Type: "gotcha", Title: "cyrillic dir", Files: []string{"/a/проект/main.go"}})
+	s.InsertMemory(ctx, &Memory{ProjectID: other, Type: "decision", Title: "other project", Files: []string{"x/main.go"}})
+	mems, err := s.ByFiles(ctx, []string{"/repo/cmd/x/main.go"}, Scope{ProjectID: pid}, 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var ids []int64
+	for _, m := range mems {
+		ids = append(ids, m.ID)
+	}
+	if len(ids) != 2 || !slices.Contains(ids, same) || !slices.Contains(ids, global) {
+		t.Fatalf("ByFiles: %v", ids)
+	}
+	for path, want := range map[string]int64{"/home/u/repo/Makefile": top, "/b/проект/main.go": uni} {
+		mems, err := s.ByFiles(ctx, []string{path}, Scope{ProjectID: pid}, 10)
+		if err != nil || len(mems) != 1 || mems[0].ID != want {
+			t.Fatalf("ByFiles(%s): %v %v", path, err, mems)
+		}
+	}
+	for _, q := range []func() ([]*Memory, error){
+		func() ([]*Memory, error) { return s.Durable(ctx, Scope{ProjectID: pid}, 10) },
+		func() ([]*Memory, error) { return s.Recent(ctx, Scope{ProjectID: pid}, 10) },
+	} {
+		mems, err := q()
+		if err != nil || len(mems) != 5 {
+			t.Fatalf("scoped query: %v %d", err, len(mems))
+		}
+		for _, m := range mems {
+			if m.ProjectID == other {
+				t.Fatal("other project leaked into scope")
+			}
+		}
 	}
 }

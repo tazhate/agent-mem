@@ -32,7 +32,7 @@ func cmdWatch(args []string) int {
 		return fail("unknown preset %q", *preset)
 	}
 	if *subagents && *preset != "codex" {
-		return fail("--subagents-only works with --preset codex only (Claude transcripts do not mark subagents)")
+		return fail("--subagents-only works with --preset codex only (the claude preset skips subagent records)")
 	}
 	cfg := loadCfg()
 	st, err := store.Open(cfg.DBPath())

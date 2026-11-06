@@ -3,11 +3,15 @@ package daemon
 import (
 	"bufio"
 	"bytes"
+	"cmp"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
+	"slices"
+	"strconv"
 	"strings"
 	"syscall"
 	"time"
@@ -110,12 +114,24 @@ func leftovers(path string) []string {
 			out = append(out, filepath.Join(dir, n))
 		}
 	}
+	// Oldest first, by the creation time in the name: draining stops at the first failure and
+	// keeps the rest for the next pass, so the order of files is the order of events.
+	slices.SortStableFunc(out, func(a, b string) int { return cmp.Compare(spoolStamp(a), spoolStamp(b)) })
 	return out
 }
 
+// spoolStamp is the UnixNano time in "<spool>.<pid>-<ns>.draining" and
+// "<spool>.side-<pid>-<ns>.jsonl".
+func spoolStamp(name string) int64 {
+	name = strings.TrimSuffix(strings.TrimSuffix(name, ".draining"), ".jsonl")
+	ns, _ := strconv.ParseInt(name[strings.LastIndexByte(name, '-')+1:], 10, 64)
+	return ns
+}
+
 // SpoolDrain feeds every spooled event to fn: first files left by earlier drains and side
-// files, then the current spool, which is moved aside under a unique name. An event whose fn
-// fails goes back to the spool for the next pass; the rest of the file is still processed.
+// files, then the current spool, which is moved aside under a unique name. Draining stops at
+// the first event fn fails on: that event and everything after it stay on disk, in order, for
+// the next pass. Order matters: a private prompt must be seen before the rest of its turn.
 func SpoolDrain(path string, fn func(*event.Event) error) (int, error) {
 	files := leftovers(path)
 	tmp := fmt.Sprintf("%s.%d-%d.draining", path, os.Getpid(), time.Now().UnixNano())
@@ -126,18 +142,17 @@ func SpoolDrain(path string, fn func(*event.Event) error) (int, error) {
 		return 0, err
 	}
 	total := 0
-	var errs []error
 	for _, f := range files {
-		n, err := drainFile(path, f, fn)
+		n, err := drainFile(f, fn)
 		total += n
 		if err != nil {
-			errs = append(errs, err)
+			return total, err
 		}
 	}
-	return total, errors.Join(errs...)
+	return total, nil
 }
 
-func drainFile(spool, file string, fn func(*event.Event) error) (int, error) {
+func drainFile(file string, fn func(*event.Event) error) (int, error) {
 	f, err := os.Open(file)
 	if err != nil {
 		return 0, err
@@ -148,17 +163,24 @@ func drainFile(spool, file string, fn func(*event.Event) error) (int, error) {
 		return 0, err
 	}
 	n := 0
-	var failed []*event.Event
+	var off int64 // start of the current line
 	sc := bufio.NewScanner(f)
 	sc.Buffer(make([]byte, 1<<20), 64<<20)
 	for sc.Scan() {
+		line := sc.Bytes()
+		start := off
+		off += int64(len(line)) + 1
 		var ev event.Event
-		if json.Unmarshal(sc.Bytes(), &ev) != nil {
+		if json.Unmarshal(line, &ev) != nil {
 			continue
 		}
 		if err := fn(&ev); err != nil {
-			failed = append(failed, &ev)
-			continue
+			// Keep the original bytes: fn may have changed the event (cleaning drops a
+			// private prompt's text, which would turn it into a public one on replay).
+			if kerr := keepTail(f, file, start); kerr != nil {
+				return n, errors.Join(err, kerr)
+			}
+			return n, fmt.Errorf("spooled event %s: %w", ev.ID, err)
 		}
 		n++
 	}
@@ -166,16 +188,31 @@ func drainFile(spool, file string, fn func(*event.Event) error) (int, error) {
 		// Unreadable remainder (e.g. a line over 64 MB): keep the file for inspection.
 		return n, fmt.Errorf("drain %s: %w", file, err)
 	}
-	for _, ev := range failed {
-		if err := SpoolAppend(spool, ev); err != nil {
-			return n, fmt.Errorf("respool: %w", err)
-		}
+	return n, os.Remove(file)
+}
+
+// keepTail replaces file with its content from off on, atomically, so events already ingested
+// are not replayed and the rest keeps its order.
+func keepTail(f *os.File, file string, off int64) error {
+	if off == 0 {
+		return nil
 	}
-	if err := os.Remove(file); err != nil {
-		return n, err
+	if _, err := f.Seek(off, io.SeekStart); err != nil {
+		return err
 	}
-	if len(failed) > 0 {
-		return n, fmt.Errorf("%d events failed and were respooled", len(failed))
+	dir, base := filepath.Split(file)
+	tmp, err := os.CreateTemp(filepath.Clean(dir), "."+base+".*.tmp")
+	if err != nil {
+		return err
 	}
-	return n, nil
+	if _, err := io.Copy(tmp, f); err != nil {
+		tmp.Close()
+		os.Remove(tmp.Name())
+		return err
+	}
+	if err := tmp.Close(); err != nil {
+		os.Remove(tmp.Name())
+		return err
+	}
+	return os.Rename(tmp.Name(), file)
 }

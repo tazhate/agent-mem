@@ -322,7 +322,14 @@ func Resolve(ctx context.Context, ref string) (string, error) {
 	case strings.HasPrefix(ref, "cmd:"):
 		ctx, cancel := context.WithTimeout(ctx, 15*time.Second)
 		defer cancel()
-		out, err := exec.CommandContext(ctx, "sh", "-c", strings.TrimPrefix(ref, "cmd:")).Output()
+		cmd := exec.CommandContext(ctx, "sh", "-c", strings.TrimPrefix(ref, "cmd:"))
+		// A helper that leaves a child holding stdout must not hang the caller past the timeout.
+		// No own process group: helpers may prompt on the terminal (pass, op).
+		cmd.WaitDelay = 2 * time.Second
+		out, err := cmd.Output()
+		if errors.Is(err, exec.ErrWaitDelay) && cmd.ProcessState != nil && cmd.ProcessState.Success() {
+			err = nil
+		}
 		if err != nil {
 			return "", fmt.Errorf("secret command: %w", err)
 		}

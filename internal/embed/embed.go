@@ -347,6 +347,9 @@ func (x *Index) backfill(ctx context.Context) (int, error) {
 		}
 		return stored, nil
 	}
+	if err := x.checkDim(ctx, vecs); err != nil {
+		return 0, err
+	}
 	qs := make([][]int8, len(vecs))
 	scales := make([]float32, len(vecs))
 	for i, v := range vecs {
@@ -369,6 +372,36 @@ func (x *Index) backfill(ctx context.Context) (int, error) {
 	return len(ids), nil
 }
 
+// checkDim handles an embedder whose output size changed under the same model name (another
+// server, another model behind the name): the old vectors cannot be compared with new ones,
+// so they are dropped and re-embedded instead of silently disabling vector search.
+func (x *Index) checkDim(ctx context.Context, vecs [][]float32) error {
+	if len(vecs) == 0 {
+		return nil
+	}
+	x.mu.Lock()
+	old, dim := x.dim, len(vecs[0])
+	x.mu.Unlock()
+	if old == 0 || old == dim {
+		return nil
+	}
+	var n int64
+	if err := x.st.Write(ctx, func(tx *sql.Tx) error {
+		res, err := tx.ExecContext(ctx, `DELETE FROM vectors WHERE model = ? AND dim > 0 AND dim != ?`, x.emb.Model(), dim)
+		if err == nil {
+			n, _ = res.RowsAffected()
+		}
+		return err
+	}); err != nil {
+		return err
+	}
+	x.log.Warn("embedding size changed; old vectors dropped for re-embedding", "model", x.emb.Model(), "was", old, "now", dim, "rows", n)
+	x.mu.Lock()
+	x.dim, x.words, x.ids, x.projects, x.bits = 0, 0, nil, nil, nil
+	x.mu.Unlock()
+	return nil
+}
+
 func (x *Index) embedOne(ctx context.Context, id, pid int64, text string) (int, error) {
 	vecs, err := x.emb.Embed(ctx, []string{text})
 	if err != nil || len(vecs) != 1 {
@@ -377,6 +410,9 @@ func (x *Index) embedOne(ctx context.Context, id, pid int64, text string) (int, 
 		}
 		x.log.Warn("embedding failed, memory skipped", "memory", id, "err", err)
 		return 1, x.markFailed(ctx, id)
+	}
+	if err := x.checkDim(ctx, vecs); err != nil {
+		return 0, err
 	}
 	q, scale := Quantize(vecs[0])
 	if err := x.st.Write(ctx, func(tx *sql.Tx) error {

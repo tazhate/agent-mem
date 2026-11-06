@@ -87,7 +87,7 @@ Switchover order:
 | `amem shadow-report` | what shadow-mode recall would have injected in the last 7 days |
 | `amem scrub [--dry-run]` | re-apply the current redaction rules to everything already stored |
 | `amem embed pull [--model repo]` | download a model2vec model for `embed.kind = "static"` |
-| `amem watch --preset claude\|codex` | transcripts for runtimes without hooks (`--subagents-only` works with `codex` only) |
+| `amem watch --preset claude\|codex` | transcripts for runtimes without hooks (`--subagents-only` works with `codex` only; the `claude` preset skips subagent records) |
 | `amem bench recall\|hook` | latency on your own database (`hook` runs against a scratch daemon) |
 | `amem mcp` | MCP server on stdio (what the runtimes start) |
 

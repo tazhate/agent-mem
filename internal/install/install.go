@@ -133,9 +133,15 @@ func Run(o Options, name string, uninstall bool) ([]Change, error) {
 	return changes, nil
 }
 
-// Installed reports which runtimes currently reference the amem binary in their hook config.
-func Installed(o Options) map[string]bool {
-	out := map[string]bool{}
+// Hook install states reported by Installed.
+const (
+	HooksCurrent = "current" // hooks run this binary
+	HooksStale   = "stale"   // hooks run some other amem binary (moved, reinstalled elsewhere)
+)
+
+// Installed reports, per runtime with amem hooks, whether they run the current binary.
+func Installed(o Options) map[string]string {
+	out := map[string]string{}
 	for path, name := range map[string]string{
 		filepath.Join(o.Home, ".claude", "settings.json"):                  "claude-code",
 		filepath.Join(o.Home, ".codex", "hooks.json"):                      "codex",
@@ -145,7 +151,13 @@ func Installed(o Options) map[string]bool {
 		filepath.Join(kimiHome(o), "config.toml"):                          "kimi",
 	} {
 		b, err := os.ReadFile(path)
-		out[name] = err == nil && strings.Contains(string(b), "hook "+name)
+		switch {
+		case err != nil || !strings.Contains(string(b), "hook "+name):
+		case strings.Contains(string(b), o.Binary):
+			out[name] = HooksCurrent
+		default:
+			out[name] = HooksStale
+		}
 	}
 	return out
 }
@@ -200,9 +212,14 @@ func shellQuote(s string) string {
 	return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'"
 }
 
-// isOurs recognizes amem hook commands for a runtime regardless of where the binary lives.
+// isOurs recognizes amem hook commands for a runtime regardless of where the binary lives:
+// "<.../amem*> hook <runtime>[ <event>]".
 func isOurs(cmd, runtime string) bool {
-	return strings.Contains(cmd, " hook "+runtime) && strings.Contains(cmd, "amem")
+	bin, rest, ok := strings.Cut(cmd, " hook ")
+	if !ok || (rest != runtime && !strings.HasPrefix(rest, runtime+" ")) {
+		return false
+	}
+	return strings.HasPrefix(filepath.Base(strings.Trim(bin, `'"`)), "amem")
 }
 
 // mergeHooks edits a {"hooks": {Event: [{matcher, hooks: [{type, command, timeout}]}]}} document.
@@ -217,15 +234,25 @@ func mergeHooks(raw, runtime string, specs []hookSpec, o Options, timeout int, u
 	}
 	// Remove previous amem entries first: install is idempotent and picks up a moved binary.
 	for _, ev := range append([]string(nil), hooks.keys...) {
-		groups, _ := hooks.get(ev).([]any)
+		// Only event lists are ours to edit; other keys (Gemini's old "enabled" toggles,
+		// say) stay as they are.
+		groups, ok := hooks.get(ev).([]any)
+		if !ok {
+			continue
+		}
 		var kept []any
+		removed := false
 		for _, g := range groups {
 			gm, _ := g.(*object)
-			if gm == nil {
+			var inner []any
+			isList := false
+			if gm != nil {
+				inner, isList = gm.get("hooks").([]any)
+			}
+			if !isList {
 				kept = append(kept, g)
 				continue
 			}
-			inner, _ := gm.get("hooks").([]any)
 			var keepInner []any
 			for _, h := range inner {
 				if hm, _ := h.(*object); hm != nil {
@@ -235,15 +262,21 @@ func mergeHooks(raw, runtime string, specs []hookSpec, o Options, timeout int, u
 				}
 				keepInner = append(keepInner, h)
 			}
-			if len(keepInner) == 0 && len(inner) > 0 {
+			if len(keepInner) == len(inner) {
+				kept = append(kept, g)
 				continue
 			}
-			gm.set("hooks", keepInner)
-			kept = append(kept, g)
+			removed = true
+			if len(keepInner) > 0 {
+				gm.set("hooks", keepInner)
+				kept = append(kept, g)
+			}
 		}
-		if len(kept) == 0 {
+		switch {
+		case !removed:
+		case len(kept) == 0:
 			hooks.del(ev)
-		} else {
+		default:
 			hooks.set(ev, kept)
 		}
 	}
@@ -552,6 +585,12 @@ func markedBlock(path, tomlBegin, tomlEnd, conflict, block string, uninstall boo
 			}
 		}
 	}
+	if uninstall && conflict != "" {
+		// The runtime may have added sub-tables of ours outside the block (Codex saves per-tool
+		// approvals as [mcp_servers.amem.tools.<tool>]); left alone they define a server with
+		// no command.
+		after = dropTables(after, strings.TrimSuffix(conflict, "]")+".")
+	}
 	if !uninstall {
 		if conflict != "" && strings.Contains(after, conflict) {
 			return Change{}, fmt.Errorf("%s already has an unmanaged %s entry", path, conflict)
@@ -562,6 +601,28 @@ func markedBlock(path, tomlBegin, tomlEnd, conflict, block string, uninstall boo
 		after += "\n" + tomlBegin + "\n" + block + tomlEnd + "\n"
 	}
 	return Change{Path: path, Before: before, After: after}, nil
+}
+
+// dropTables removes TOML tables whose header starts with prefix, up to the next header.
+func dropTables(text, prefix string) string {
+	if !strings.Contains(text, prefix) {
+		return text
+	}
+	var b strings.Builder
+	skip := false
+	for line := range strings.SplitAfterSeq(text, "\n") {
+		if t := strings.TrimSpace(line); strings.HasPrefix(t, "[") {
+			skip = strings.HasPrefix(t, prefix)
+		}
+		if !skip {
+			b.WriteString(line)
+		}
+	}
+	out := b.String()
+	if strings.TrimSpace(out) == "" {
+		return ""
+	}
+	return out
 }
 
 // Binary returns the absolute, symlink-resolved path of the running executable.
