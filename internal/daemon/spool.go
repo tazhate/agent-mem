@@ -3,12 +3,15 @@ package daemon
 import (
 	"bufio"
 	"bytes"
+	"cmp"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"os"
 	"path/filepath"
+	"slices"
+	"strconv"
 	"strings"
 	"syscall"
 	"time"
@@ -111,7 +114,18 @@ func leftovers(path string) []string {
 			out = append(out, filepath.Join(dir, n))
 		}
 	}
+	// Oldest first, by the creation time in the name: draining stops at the first failure and
+	// keeps the rest for the next pass, so the order of files is the order of events.
+	slices.SortStableFunc(out, func(a, b string) int { return cmp.Compare(spoolStamp(a), spoolStamp(b)) })
 	return out
+}
+
+// spoolStamp is the UnixNano time in "<spool>.<pid>-<ns>.draining" and
+// "<spool>.side-<pid>-<ns>.jsonl".
+func spoolStamp(name string) int64 {
+	name = strings.TrimSuffix(strings.TrimSuffix(name, ".draining"), ".jsonl")
+	ns, _ := strconv.ParseInt(name[strings.LastIndexByte(name, '-')+1:], 10, 64)
+	return ns
 }
 
 // SpoolDrain feeds every spooled event to fn: first files left by earlier drains and side

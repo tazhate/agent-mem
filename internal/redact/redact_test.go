@@ -67,6 +67,9 @@ func TestNoFalsePositive(t *testing.T) {
 		"max_tokens: 4096",
 		"docker run -u 1000:1000 alpine",
 		"git push -u origin main:main",
+		"docker run -u postgres:postgres img",
+		"rsync -u server:/srv/data .",
+		"kubectl --user admin:context get pods",
 	} {
 		if got := r.Clean(in); got != in {
 			t.Errorf("Clean(%q) = %q, want unchanged", in, got)

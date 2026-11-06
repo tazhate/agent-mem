@@ -81,3 +81,19 @@ func TestSpoolSideFileWhenLocked(t *testing.T) {
 		t.Fatalf("side file not drained: %v", got)
 	}
 }
+
+func TestLeftoversOldestFirst(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "spool.jsonl")
+	for _, n := range []string{"spool.jsonl.side-10001-300.jsonl", "spool.jsonl.9999-200.draining", "spool.jsonl.10001-100.draining"} {
+		os.WriteFile(filepath.Join(dir, n), nil, 0o600)
+	}
+	var got []string
+	for _, f := range leftovers(path) {
+		got = append(got, filepath.Base(f))
+	}
+	want := []string{"spool.jsonl.10001-100.draining", "spool.jsonl.9999-200.draining", "spool.jsonl.side-10001-300.jsonl"}
+	if !slices.Equal(got, want) {
+		t.Fatalf("order: %v", got)
+	}
+}

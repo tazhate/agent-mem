@@ -425,8 +425,9 @@ func (s *Store) ByFiles(ctx context.Context, paths []string, sc Scope, limit int
 		if d := filepath.Dir(p); d == "." || d == "/" {
 			suffix = filepath.Base(p)
 		}
-		cond = append(cond, `f.path = ? OR (f.base = ? AND (f.path = ? OR substr(f.path, -?) = ?))`)
-		args = append(args, p, filepath.Base(p), suffix, len(suffix)+1, "/"+suffix)
+		// A bare stored name (Makefile, AGENTS.md) is a top-level file: it matches by name.
+		cond = append(cond, `f.path = ? OR (f.base = ? AND (f.path = f.base OR f.path = ? OR substr(f.path, -length(?)) = ?))`)
+		args = append(args, p, filepath.Base(p), suffix, "/"+suffix, "/"+suffix)
 	}
 	// Start from the matching files, not from the project's rows: a project condition the
 	// planner cannot use an index for keeps it from walking the whole project.

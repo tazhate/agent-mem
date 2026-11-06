@@ -59,7 +59,7 @@ type Server struct {
 
 	// drainMu serializes spool drains (startup, ticker, before live events).
 	drainMu    sync.Mutex
-	drainFails map[string]int // event id -> failed drain passes
+	drainFails map[string]time.Time // event id -> first failed drain
 }
 
 // New prepares a server; callers attach workers before Run.
@@ -187,9 +187,11 @@ func (s *Server) Run(ctx context.Context, foreground bool) error {
 	return nil
 }
 
-// maxDrainFails is how many drain passes an event may fail before it is dropped, so one
-// event that can never be stored does not hold up the spool behind it forever.
-const maxDrainFails = 30
+// drainGiveUp is how long a spooled event may keep failing before it is dropped, so one event
+// that can never be stored does not hold up the spool behind it forever. It is a duration, not
+// a pass count: drains run on every live event, and most failures (disk full, a held write
+// lock) are about the database, not the event.
+const drainGiveUp = 15 * time.Minute
 
 func (s *Server) drainSpool(ctx context.Context) {
 	s.drainMu.Lock()
@@ -201,14 +203,21 @@ func (s *Server) drainSpool(ctx context.Context) {
 			return err
 		}
 		if s.drainFails == nil {
-			s.drainFails = map[string]int{}
+			s.drainFails = map[string]time.Time{}
 		}
-		if s.drainFails[ev.ID]++; s.drainFails[ev.ID] >= maxDrainFails {
-			delete(s.drainFails, ev.ID)
-			s.log.Error("spooled event dropped", "id", ev.ID, "kind", ev.Kind, "err", err)
-			return nil
+		first, ok := s.drainFails[ev.ID]
+		if !ok {
+			s.drainFails[ev.ID] = time.Now()
+			return err
 		}
-		return err
+		// A private prompt is never dropped: without it the rest of its turn would be stored
+		// as public.
+		if time.Since(first) < drainGiveUp || (ev.Kind == event.Prompt && ev.Prompt == PrivateMarker) {
+			return err
+		}
+		delete(s.drainFails, ev.ID)
+		s.log.Error("spooled event dropped", "id", ev.ID, "kind", ev.Kind, "err", err)
+		return nil
 	})
 	if err != nil {
 		s.log.Error("spool drain", "err", err)

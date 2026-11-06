@@ -83,8 +83,9 @@ var specific = []rule{
 var generic = []rule{
 	// Quotes may be backslash-escaped: JSON embedded in a JSON string or a log line.
 	{name: "secret", re: regexp.MustCompile(`(?i)(\b[\w-]*(?:password|passwd|pwd|secret|token|api[_-]?key|apikey|access[_-]?key|private[_-]?key)(?:\\?["'])?\s{0,8}[=:]\s{0,8}(?:\\?["'])?)(` + genericValue + `)`), group: 2, needLetter: true, hints: []string{"password", "passwd", "pwd", "secret", "token", "key"}},
-	// curl -u user:pass, curl --user user:pass.
-	{name: "user_flag", re: regexp.MustCompile(`((?:^|\s)(?:-u|--user)[= ]\s{0,4}["']?[^\s:'"]{1,64}:)([^\s'"]{3,256})`), group: 2, needLetter: true, hints: []string{"-u", "--user"}},
+	// curl -u user:pass, wget --user user:pass. Tied to the command: -u means a uid:gid or a
+	// path elsewhere (docker run -u postgres:postgres, rsync -u host:/srv).
+	{name: "user_flag", re: regexp.MustCompile(`(?i)(\b(?:curl|wget)\b[^\n]*?\s(?:-u|--user)[= ]\s{0,4}["']?[^\s:'"/]{1,64}:)([^\s'"/][^\s'"]{2,255})`), group: 2, needLetter: true, hints: []string{"curl", "wget"}},
 	{name: "secret_flag", re: regexp.MustCompile(`(?i)(--(?:token|password|passwd|api-key|apikey|secret)[= ]["']?)(` + genericValue + `)`), group: 2, needLetter: true, hints: []string{"--token", "--password", "--passwd", "--api-key", "--apikey", "--secret"}},
 }
 
