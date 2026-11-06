@@ -11,6 +11,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"time"
 
 	"github.com/BurntSushi/toml"
@@ -322,7 +323,18 @@ func Resolve(ctx context.Context, ref string) (string, error) {
 	case strings.HasPrefix(ref, "cmd:"):
 		ctx, cancel := context.WithTimeout(ctx, 15*time.Second)
 		defer cancel()
-		out, err := exec.CommandContext(ctx, "sh", "-c", strings.TrimPrefix(ref, "cmd:")).Output()
+		cmd := exec.CommandContext(ctx, "sh", "-c", strings.TrimPrefix(ref, "cmd:"))
+		// A helper that leaves a child holding stdout must not hang the caller past the timeout.
+		cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+		cmd.Cancel = func() error { return syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL) }
+		cmd.WaitDelay = 2 * time.Second
+		out, err := cmd.Output()
+		if cmd.Process != nil {
+			_ = syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
+		}
+		if errors.Is(err, exec.ErrWaitDelay) && cmd.ProcessState != nil && cmd.ProcessState.Success() {
+			err = nil
+		}
 		if err != nil {
 			return "", fmt.Errorf("secret command: %w", err)
 		}

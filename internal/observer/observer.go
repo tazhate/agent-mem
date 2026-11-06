@@ -18,6 +18,7 @@ import (
 	"github.com/tazhate/agent-mem/internal/event"
 	"github.com/tazhate/agent-mem/internal/provider"
 	"github.com/tazhate/agent-mem/internal/recall"
+	"github.com/tazhate/agent-mem/internal/redact"
 	"github.com/tazhate/agent-mem/internal/store"
 )
 
@@ -38,11 +39,24 @@ type Observer struct {
 
 	backoff map[string]time.Time
 	fails   map[string]int
+	// red masks secrets in what the model writes back; captured input is already clean, but
+	// a model with tools (codex, gemini presets) can read files and quote them.
+	red *redact.Redactor
 }
 
 func New(st *store.Store, cfg config.ObserverConfig, rec *recall.Engine, log *slog.Logger) *Observer {
 	return &Observer{st: st, cfg: cfg, rec: rec, log: log, kicks: make(chan kick, 256),
 		backoff: map[string]time.Time{}, fails: map[string]int{}}
+}
+
+// SetRedactor masks secrets in model output before it is stored.
+func (o *Observer) SetRedactor(r *redact.Redactor) { o.red = r }
+
+func (o *Observer) clean(v string) string {
+	if o.red == nil {
+		return v
+	}
+	return o.red.Clean(v)
 }
 
 // SetProvider overrides provider construction (tests, `amem observe --dry-run`).
@@ -234,7 +248,7 @@ func (o *Observer) observe(ctx context.Context, prov provider.Provider, sess sto
 	}
 	stored := 0
 	for _, d := range drafts {
-		m := d.memory(sess, turns[len(turns)-1].n)
+		m := d.memory(sess, turns[len(turns)-1].n, o.clean)
 		if m == nil {
 			continue
 		}
@@ -358,6 +372,9 @@ func (o *Observer) summarize(ctx context.Context, sid string) {
 	}
 	delete(o.fails, key)
 	su.SessionID, su.ProjectID, su.ID = sid, sess.ProjectID, 0
+	for _, f := range []*string{&su.Request, &su.Investigated, &su.Learned, &su.Completed, &su.NextSteps, &su.Notes} {
+		*f = o.clean(*f)
+	}
 	if err := o.st.InsertSummary(ctx, &su); err != nil {
 		o.log.Warn("summary store", "err", err)
 		return
@@ -374,7 +391,13 @@ type draft struct {
 	Replaces []int64  `json:"replaces"`
 }
 
-func (d draft) memory(sess store.Session, turn int) *store.Memory {
+func (d draft) memory(sess store.Session, turn int, clean func(string) string) *store.Memory {
+	d.Title, d.Body = clean(d.Title), clean(d.Body)
+	for _, l := range [][]string{d.Facts, d.Files} {
+		for i := range l {
+			l[i] = clean(l[i])
+		}
+	}
 	title := clip(oneLine(d.Title), 120)
 	if title == "" {
 		return nil
@@ -479,9 +502,16 @@ func retryable(err error) bool {
 	if errors.Is(err, context.DeadlineExceeded) || errors.Is(err, context.Canceled) {
 		return true
 	}
-	var pe *provider.Error
-	if errors.As(err, &pe) {
-		return pe.Retryable
+	// A fallback chain joins its members' errors: one provider that is only down (the rest
+	// misconfigured, say) is enough to keep the batch.
+	if pe, ok := err.(*provider.Error); ok {
+		return pe.Retryable || retryable(pe.Err)
+	}
+	switch u := err.(type) {
+	case interface{ Unwrap() []error }:
+		return slices.ContainsFunc(u.Unwrap(), retryable)
+	case interface{ Unwrap() error }:
+		return retryable(u.Unwrap())
 	}
 	return false
 }

@@ -125,7 +125,14 @@ func (s *Server) api(ctx context.Context, op string, raw json.RawMessage) (any, 
 		if p.Type != "" && !store.ValidType(p.Type) {
 			return nil, fmt.Errorf("unknown type %q (valid: %s)", p.Type, strings.Join(store.Types, ", "))
 		}
-		m := &store.Memory{Type: p.Type, Title: s.red.Clean(p.Title), Body: s.red.Clean(p.Text), Files: p.Files, Origin: "manual"}
+		// Same cleaning and size cap as captured text: the agent may paste a whole log.
+		limit := s.cfg.Capture.MaxFieldChars
+		m := &store.Memory{Type: p.Type, Title: CleanText(s.red, true, p.Title, 300), Body: CleanText(s.red, true, p.Text, limit), Origin: "manual"}
+		for _, f := range p.Files[:min(len(p.Files), 50)] {
+			if f = CleanText(s.red, true, f, 400); strings.TrimSpace(f) != "" {
+				m.Files = append(m.Files, f)
+			}
+		}
 		if m.Type == "" {
 			m.Type = "discovery"
 			if p.Global {

@@ -239,6 +239,18 @@ type claudeParser struct{}
 
 func (claudeParser) Runtime() string { return "claude-code" }
 
+// claudeSystemText reports user-role records the harness wrote, not the user: task
+// notifications, slash command echoes and their output.
+func claudeSystemText(t string) bool {
+	t = strings.TrimSpace(t)
+	for _, p := range []string{"<task-notification>", "<command-name>", "<command-message>", "<local-command-stdout>", "<local-command-stderr>", "<local-command-caveat>"} {
+		if strings.HasPrefix(t, p) {
+			return true
+		}
+	}
+	return false
+}
+
 func (claudeParser) Line(fs *FileState, line []byte) []*event.Event {
 	var rec struct {
 		Type      string `json:"type"`
@@ -246,13 +258,17 @@ func (claudeParser) Line(fs *FileState, line []byte) []*event.Event {
 		Cwd       string `json:"cwd"`
 		Timestamp string `json:"timestamp"`
 		IsMeta    bool   `json:"isMeta"`
-		Message   struct {
+		// Subagent records (subagents/agent-*.jsonl) carry the parent's sessionId; compact
+		// summaries are written as user messages.
+		IsSidechain      bool `json:"isSidechain"`
+		IsCompactSummary bool `json:"isCompactSummary"`
+		Message          struct {
 			Role       string          `json:"role"`
 			Content    json.RawMessage `json:"content"`
 			StopReason string          `json:"stop_reason"`
 		} `json:"message"`
 	}
-	if json.Unmarshal(line, &rec) != nil || rec.IsMeta {
+	if json.Unmarshal(line, &rec) != nil || rec.IsMeta || rec.IsSidechain || rec.IsCompactSummary {
 		return nil
 	}
 	if fs.Session == "" && rec.SessionID != "" {
@@ -282,6 +298,9 @@ func (claudeParser) Line(fs *FileState, line []byte) []*event.Event {
 	var out []*event.Event
 	switch rec.Type {
 	case "user":
+		if claudeSystemText(text) {
+			return nil
+		}
 		if text != "" {
 			e := ev(fs, "claude-code", event.Prompt, ts)
 			e.Prompt = text
@@ -290,6 +309,9 @@ func (claudeParser) Line(fs *FileState, line []byte) []*event.Event {
 		for _, b := range blocks {
 			switch b.Type {
 			case "text":
+				if claudeSystemText(b.Text) {
+					continue
+				}
 				e := ev(fs, "claude-code", event.Prompt, ts)
 				e.Prompt = b.Text
 				out = append(out, e)
@@ -412,7 +434,8 @@ func (codexParser) Line(fs *FileState, line []byte) []*event.Event {
 		}
 		t := b.String()
 		if strings.HasPrefix(t, "<environment_context>") || strings.HasPrefix(t, "<user_instructions>") ||
-			strings.HasPrefix(t, "<recommended_plugins>") || strings.HasPrefix(t, "<skills_instructions>") {
+			strings.HasPrefix(t, "<recommended_plugins>") || strings.HasPrefix(t, "<skills_instructions>") ||
+			strings.HasPrefix(t, "# AGENTS.md instructions") || strings.HasPrefix(t, "<user_action>") {
 			return nil
 		}
 		e := ev(fs, "codex", event.Prompt, ts)

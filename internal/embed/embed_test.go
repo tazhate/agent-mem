@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -141,3 +142,48 @@ func (m staticModel) Model() string                                        { ret
 func (m staticModel) Embed(context.Context, []string) ([][]float32, error) { return nil, nil }
 
 func itoa(n int) string { b, _ := json.Marshal(n); return string(b) }
+
+func TestDimensionChangeReembeds(t *testing.T) {
+	var size atomic.Int32
+	size.Store(8)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var req struct {
+			Input []string `json:"input"`
+		}
+		json.NewDecoder(r.Body).Decode(&req)
+		type item struct {
+			Index     int       `json:"index"`
+			Embedding []float32 `json:"embedding"`
+		}
+		var out struct {
+			Data []item `json:"data"`
+		}
+		for i := range req.Input {
+			v := make([]float32, size.Load())
+			v[0] = 1
+			out.Data = append(out.Data, item{i, v})
+		}
+		json.NewEncoder(w).Encode(out)
+	}))
+	defer srv.Close()
+	ctx := t.Context()
+	st, _ := store.Open(filepath.Join(t.TempDir(), "t.db"))
+	defer st.Close()
+	pid, _ := st.EnsureProject(ctx, "k", "p", "")
+	st.InsertMemory(ctx, &store.Memory{ProjectID: pid, Type: "gotcha", Title: "first"})
+	cfg := config.EmbedConfig{Kind: "openai", BaseURL: srv.URL, Model: "same-name", BatchSize: 8}
+	emb, _ := NewEmbedder(ctx, cfg, t.TempDir())
+	idx := NewIndex(st, emb, cfg, slog.New(slog.NewTextHandler(io.Discard, nil)), func() time.Time { return time.Time{} })
+	idx.load(ctx)
+	for n, _ := idx.backfill(ctx); n > 0; n, _ = idx.backfill(ctx) {
+	}
+	size.Store(16) // another server behind the same model name
+	st.InsertMemory(ctx, &store.Memory{ProjectID: pid, Type: "gotcha", Title: "second"})
+	for n, _ := idx.backfill(ctx); n > 0; n, _ = idx.backfill(ctx) {
+	}
+	var old int
+	st.DB().QueryRow(`SELECT count(*) FROM vectors WHERE dim != 16`).Scan(&old)
+	if idx.dim != 16 || len(idx.ids) != 2 || old != 0 {
+		t.Fatalf("dim=%d ids=%d old=%d", idx.dim, len(idx.ids), old)
+	}
+}

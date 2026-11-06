@@ -81,7 +81,10 @@ func (e *Engine) Recall(ctx context.Context, req Request) (Result, error) {
 	scope := store.Scope{ProjectID: req.ProjectID, Fatigue: e.cfg.FatigueAfter}
 	switch ev.Kind {
 	case event.SessionStart:
-		if ev.Source == "compact" || ev.Source == "resume" {
+		if ev.Source == "compact" {
+			return compacted(e.sessionState(ctx, req))
+		}
+		if ev.Source == "resume" {
 			return e.sessionState(ctx, req)
 		}
 		res, err := e.sessionStart(ctx, req, seen)
@@ -90,7 +93,7 @@ func (e *Engine) Recall(ctx context.Context, req Request) (Result, error) {
 		}
 		return res, err
 	case event.Compact:
-		return e.sessionState(ctx, req)
+		return compacted(e.sessionState(ctx, req))
 	case event.Prompt:
 		if len([]rune(ev.Prompt)) < e.cfg.MinPromptChars {
 			return Result{}, nil
@@ -115,7 +118,12 @@ func (e *Engine) Recall(ctx context.Context, req Request) (Result, error) {
 			if seen[m.ID] {
 				continue
 			}
-			picked = append(picked, Scored{Mem: m, Rel: 1, Score: typeWeight(m.Type) * recency(m) * usage(m)})
+			sc := Scored{Mem: m, Rel: 1, Score: typeWeight(m.Type) * recency(m) * usage(m)}
+			// Past the session budget only strong file matches get through.
+			if strict > 1 && sc.Score < e.cfg.MinScore*strict {
+				continue
+			}
+			picked = append(picked, sc)
 		}
 		slices.SortFunc(picked, func(a, b Scored) int { return cmp.Compare(b.Score, a.Score) })
 		picked = picked[:min(len(picked), e.cfg.FileLimit)]
@@ -329,6 +337,17 @@ func (e *Engine) sessionStart(ctx context.Context, req Request, seen map[int64]b
 	}
 	b.WriteString("Search: memory_search(query) · Full records: memory_get(ids)\n")
 	return Result{Trigger: "session_start", Text: wrap(b.String()), Items: items}, nil
+}
+
+// compacted puts a compaction marker before the result's injections: what was injected
+// earlier left the model's context with the compaction, so recall may show it again.
+func compacted(res Result, err error) (Result, error) {
+	if err != nil {
+		return res, err
+	}
+	res.Items = append([]store.Injection{{MemoryID: store.CompactMarker}}, res.Items...)
+	res.Trigger = cmp.Or(res.Trigger, "compact")
+	return res, nil
 }
 
 // sessionState re-injects what the current session already learned (after compaction or resume).

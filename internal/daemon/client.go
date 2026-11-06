@@ -15,6 +15,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/tazhate/agent-mem/internal/adapter"
 	"github.com/tazhate/agent-mem/internal/config"
 	"github.com/tazhate/agent-mem/internal/event"
 	"github.com/tazhate/agent-mem/internal/redact"
@@ -246,6 +247,10 @@ func Sanitize(cfg *config.Config, ev *event.Event) {
 		ev.Prompt = PrivateMarker
 	} else {
 		ev.Prompt = fix(ev.Prompt)
+	}
+	// Read the answer now: by the time the spool drains, the transcript has moved on.
+	if ev.Kind == event.TurnEnd && ev.LastAssistant == "" && ev.TranscriptPath != "" {
+		ev.LastAssistant = adapter.LastAssistantFromTranscript(ev.TranscriptPath)
 	}
 	ev.LastAssistant = fix(ev.LastAssistant)
 	if t := ev.Tool; t != nil {

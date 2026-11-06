@@ -317,6 +317,17 @@ func TestPrivateBlockSurvivesElision(t *testing.T) {
 	}
 }
 
+func TestPrivateKeyCutByElision(t *testing.T) {
+	r := redact.New(true)
+	// The tail cut (last 30% of the limit) lands inside the key, past its BEGIN line.
+	key := "-----BEGIN RSA " + "PRIVATE KEY-----\n" + strings.Repeat("MIIEowIBAAKCAQEAkeyMaterialLine0123456789abcdef\n", 200) + "-----END RSA " + "PRIVATE KEY-----\n"
+	text := strings.Repeat("noise ", 4000) + key + strings.Repeat("x", 1000)
+	out := CleanText(r, true, text, 16000)
+	if strings.Contains(out, "keyMaterialLine") {
+		t.Fatal("key body survived after elision cut its BEGIN line")
+	}
+}
+
 func TestNestedWorkFieldsRedacted(t *testing.T) {
 	s, repo := newServer(t, "on")
 	var lists []store.WorkList

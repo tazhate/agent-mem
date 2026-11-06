@@ -3,6 +3,7 @@ package observer
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"log/slog"
 	"path/filepath"
@@ -198,5 +199,16 @@ func TestEmptyObjectIsNotAnAnswer(t *testing.T) {
 		if o.fail("k", &provider.Error{Retryable: true, Err: context.DeadlineExceeded}) {
 			t.Fatal("gave up on a retryable outage")
 		}
+	}
+}
+
+func TestRetryableChain(t *testing.T) {
+	misconfigured := &provider.Error{Provider: "a", Err: io.EOF}
+	down := &provider.Error{Provider: "b", Retryable: true, Err: context.DeadlineExceeded}
+	if !retryable(errors.Join(misconfigured, down)) {
+		t.Fatal("a chain with one provider merely down must keep the batch")
+	}
+	if retryable(errors.Join(misconfigured, &provider.Error{Provider: "c", Err: io.EOF})) {
+		t.Fatal("all-permanent chain must be able to give up")
 	}
 }

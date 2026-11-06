@@ -82,12 +82,15 @@ func cmdDoctor(args []string) int {
 	if err == nil {
 		inst := install.Installed(o)
 		for _, rt := range install.Runtimes() {
-			if inst[rt] {
+			switch inst[rt] {
+			case install.HooksCurrent:
 				ok(true, "%s hooks installed", rt)
+			case install.HooksStale:
+				ok(false, "%s hooks run another amem binary, not %s (amem install %s)", rt, o.Binary, rt)
 			}
 		}
 		for _, rt := range install.Detected(o) {
-			if !inst[rt] {
+			if inst[rt] == "" {
 				fmt.Printf("     %s detected but not installed (amem install %s)\n", rt, rt)
 			}
 		}

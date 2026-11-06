@@ -82,6 +82,9 @@ CREATE INDEX IF NOT EXISTS memories_project ON memories(project_id, created_at);
 CREATE INDEX IF NOT EXISTS memories_session ON memories(session_id);
 -- Covering index for recall filters, so FTS hits are scoped without reading the wide rows.
 CREATE INDEX IF NOT EXISTS memories_scope ON memories(id, project_id, type, private, superseded_by, created_at);
+-- Durable(): live memories of a project by type with the ranking columns, read without the rows.
+CREATE INDEX IF NOT EXISTS memories_kind ON memories(project_id, type, use_count, inject_count, created_at)
+	WHERE private = 0 AND superseded_by IS NULL;
 CREATE UNIQUE INDEX IF NOT EXISTS memories_origin ON memories(origin, origin_id) WHERE origin IS NOT NULL;
 
 CREATE TABLE IF NOT EXISTS memory_files (

@@ -31,6 +31,13 @@ func TestClean(t *testing.T) {
 		{"DefaultEndpointsProtocol=https;AccountKey=abcDEF123456789+/abcdefghij==;", "abcDEF123456789", "AccountKey="},
 		{"head id_rsa\n-----BEGIN OPENSSH PRIVATE KEY-----\nb3BlbnNzaC1rZXktdjEAAAA", "b3BlbnNzaC1rZXkt", "head id_rsa"},
 		{"x <PRIVATE>secret upper</PRIVATE> y", "secret upper", "y"},
+		{"REDIS_URL=redis://:SuperSecret123@cache:6379", "SuperSecret123", "redis://:"},
+		{"https://user:pa@ss99word@host/x", "ss99word", "@host/x"},
+		{`"annotation": "{\"password\":\"hunter2hunter2\"}"`, "hunter2hunter2", "annotation"},
+		{"curl -u admin:Adm1nPass https://api", "Adm1nPass", "curl -u admin:"},
+		{"client_secret GOCSPX-" + "abcdefghijklmnopqrstuvwx", "abcdefghijklmnop", "client_secret"},
+		{"key SG." + "abcdefghijklmnopqr." + "stuvwxyzABCDEFGHIJ end", "stuvwxyzABCDEF", "end"},
+		{"DO dop_v1_" + strings.Repeat("ab12", 16) + " end", "ab12ab12ab12", "end"},
 	}
 	for _, c := range cases {
 		got := r.Clean(c.in)
@@ -58,6 +65,8 @@ func TestNoFalsePositive(t *testing.T) {
 		`<div class="sk-spinner-fading-circle-wrapper">`,
 		"see https://example.com/docs:intro@section",
 		"max_tokens: 4096",
+		"docker run -u 1000:1000 alpine",
+		"git push -u origin main:main",
 	} {
 		if got := r.Clean(in); got != in {
 			t.Errorf("Clean(%q) = %q, want unchanged", in, got)

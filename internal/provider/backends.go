@@ -45,11 +45,29 @@ func post(ctx context.Context, name, url string, headers map[string]string, body
 	switch {
 	case resp.StatusCode == http.StatusTooManyRequests || resp.StatusCode >= 500:
 		return out, resp.StatusCode, retryable(name, fmt.Errorf("HTTP %d: %.300s", resp.StatusCode, out))
+	case accountProblem(resp.StatusCode, out):
+		// A bad key or an empty balance is fixed by the user, not by dropping the batch: keep
+		// it queued and retry with backoff.
+		return out, resp.StatusCode, retryable(name, fmt.Errorf("HTTP %d (check the key and billing): %.300s", resp.StatusCode, out))
 	case resp.StatusCode >= 400:
 		return out, resp.StatusCode, permanent(name, fmt.Errorf("HTTP %d: %.300s", resp.StatusCode, out))
 	}
 	return out, resp.StatusCode, nil
 }
+
+// accountProblem reports auth and billing failures.
+func accountProblem(status int, body []byte) bool {
+	switch status {
+	case http.StatusUnauthorized, http.StatusPaymentRequired, http.StatusForbidden:
+		return true
+	case http.StatusBadRequest:
+		return mentions(body, "credit balance", "billing", "insufficient_quota")
+	}
+	return false
+}
+
+// errTruncated is output cut off by the token limit; retrying the same request gets the same.
+var errTruncated = errors.New("output truncated by the token limit; raise max_tokens")
 
 // --- Anthropic Messages -----------------------------------------------------
 
@@ -65,7 +83,7 @@ func (a *anthropic) Complete(ctx context.Context, req Request) (json.RawMessage,
 	headers := map[string]string{"x-api-key": a.key, "anthropic-version": "2023-06-01"}
 	body := map[string]any{
 		"model":      cmp.Or(a.model, "claude-haiku-4-5"),
-		"max_tokens": cmp.Or(req.MaxTokens, a.maxTokens, 4096),
+		"max_tokens": cmp.Or(a.maxTokens, req.MaxTokens, 4096),
 		"system":     req.System,
 		"messages":   []map[string]any{{"role": "user", "content": req.User}},
 		"output_config": map[string]any{
@@ -92,6 +110,9 @@ func (a *anthropic) Complete(ctx context.Context, req Request) (json.RawMessage,
 	if err := json.Unmarshal(out, &resp); err != nil {
 		return nil, retryable(a.name, err)
 	}
+	if resp.StopReason == "max_tokens" {
+		return nil, permanent(a.name, errTruncated)
+	}
 	var text strings.Builder
 	for _, c := range resp.Content {
 		if c.Type == "text" {
@@ -100,7 +121,7 @@ func (a *anthropic) Complete(ctx context.Context, req Request) (json.RawMessage,
 	}
 	raw, err := extractJSON(text.String())
 	if err != nil {
-		return nil, retryable(a.name, err)
+		return nil, permanent(a.name, err)
 	}
 	return raw, nil
 }
@@ -135,7 +156,7 @@ func (o *openai) Complete(ctx context.Context, req Request) (json.RawMessage, er
 	}
 	// max_tokens is rejected by GPT-5 and o-series models; max_completion_tokens is the
 	// current name and OpenAI-compatible servers that predate it ignore unknown fields.
-	if n := cmp.Or(req.MaxTokens, o.maxTokens); n > 0 {
+	if n := cmp.Or(o.maxTokens, req.MaxTokens); n > 0 {
 		body["max_completion_tokens"] = n
 	}
 	out, status, err := post(ctx, o.name, url, headers, body)
@@ -169,6 +190,7 @@ func (o *openai) Complete(ctx context.Context, req Request) (json.RawMessage, er
 			Message struct {
 				Content string `json:"content"`
 			} `json:"message"`
+			FinishReason string `json:"finish_reason"`
 		} `json:"choices"`
 	}
 	if err := json.Unmarshal(out, &resp); err != nil {
@@ -177,9 +199,12 @@ func (o *openai) Complete(ctx context.Context, req Request) (json.RawMessage, er
 	if len(resp.Choices) == 0 {
 		return nil, retryable(o.name, errors.New("empty choices"))
 	}
+	if resp.Choices[0].FinishReason == "length" {
+		return nil, permanent(o.name, errTruncated)
+	}
 	raw, err := extractJSON(resp.Choices[0].Message.Content)
 	if err != nil {
-		return nil, retryable(o.name, err)
+		return nil, permanent(o.name, err)
 	}
 	return raw, nil
 }
@@ -262,7 +287,15 @@ func (e *execProvider) Complete(ctx context.Context, req Request) (json.RawMessa
 	cmd.Env = append(env, "AMEM_DISABLE=1")
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout, cmd.Stderr = &stdout, &stderr
-	if err := cmd.Run(); err != nil {
+	err = cmd.Run()
+	if cmd.Process != nil {
+		// Children that outlived the CLI (and may hold stdout open) go with it.
+		_ = syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
+	}
+	if errors.Is(err, exec.ErrWaitDelay) && cmd.ProcessState != nil && cmd.ProcessState.Success() {
+		err = nil // the CLI answered and exited 0; only a lingering child kept stdout open
+	}
+	if err != nil {
 		if errors.Is(err, exec.ErrNotFound) {
 			return nil, permanent(e.name, err)
 		}
@@ -292,7 +325,7 @@ func (e *execProvider) Complete(ctx context.Context, req Request) (json.RawMessa
 	}
 	raw, err := extractJSON(text)
 	if err != nil {
-		return nil, retryable(e.name, err)
+		return nil, permanent(e.name, err)
 	}
 	return raw, nil
 }

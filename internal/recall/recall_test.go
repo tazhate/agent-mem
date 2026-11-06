@@ -54,3 +54,43 @@ func TestOneLineDropsControls(t *testing.T) {
 		t.Fatalf("oneLine: %q", got)
 	}
 }
+
+func TestFatigueSparesRules(t *testing.T) {
+	ctx := t.Context()
+	st, err := store.Open(filepath.Join(t.TempDir(), "r.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	pid, _ := st.EnsureProject(ctx, "k", "p", "")
+	rule, _, _ := st.InsertMemory(ctx, &store.Memory{Type: "preference", Title: "answer in short sentences"})
+	st.DB().Exec(`UPDATE memories SET inject_count = 50 WHERE id = ?`, rule)
+	mems, err := st.Durable(ctx, store.Scope{ProjectID: pid, Fatigue: 10}, 30)
+	if err != nil || len(mems) != 1 || mems[0].ID != rule {
+		t.Fatalf("global preference hidden by fatigue: %v %v", err, mems)
+	}
+}
+
+func TestCompactionResetsSeen(t *testing.T) {
+	ctx := t.Context()
+	st, err := store.Open(filepath.Join(t.TempDir(), "r.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	pid, _ := st.EnsureProject(ctx, "k", "p", "")
+	id, _, _ := st.InsertMemory(ctx, &store.Memory{ProjectID: pid, Type: "gotcha", Title: "vault sealed: scripts cannot read keys until unseal"})
+	st.RecordInjections(ctx, "s", "prompt", []store.Injection{{MemoryID: id, Tokens: 10}}, false)
+	if seen, _, _ := st.Injected(ctx, "s"); !seen[id] {
+		t.Fatal("injection not seen")
+	}
+	e := New(st, config.Default().Recall, nil)
+	res, err := e.Recall(ctx, Request{Event: &event.Event{Kind: event.SessionStart, Source: "compact"}, SessionID: "s", ProjectID: pid, ProjectName: "p"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	st.RecordInjections(ctx, "s", res.Trigger, res.Items, false)
+	if seen, spent, _ := st.Injected(ctx, "s"); seen[id] || spent != 0 {
+		t.Fatalf("compaction did not reset seen: %v %d", seen, spent)
+	}
+}
