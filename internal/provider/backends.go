@@ -299,7 +299,9 @@ func (e *execProvider) Complete(ctx context.Context, req Request) (json.RawMessa
 		if errors.Is(err, exec.ErrNotFound) {
 			return nil, permanent(e.name, err)
 		}
-		return nil, retryable(e.name, fmt.Errorf("%v: %.300s", err, strings.TrimSpace(stderr.String())))
+		// claude -p reports failures on stdout as JSON and leaves stderr empty.
+		msg := cmp.Or(strings.TrimSpace(stderr.String()), strings.TrimSpace(stdout.String()))
+		return nil, retryable(e.name, fmt.Errorf("%v: %.300s", err, msg))
 	}
 	text := stdout.String()
 	if usesOut {

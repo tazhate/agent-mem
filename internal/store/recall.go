@@ -212,11 +212,13 @@ func (s *Store) LatestSummary(ctx context.Context, projectID int64, excludeSessi
 	return &su, err
 }
 
-// UnsummarizedSessions returns ended or idle sessions of a project that have memories but no summary.
+// UnsummarizedSessions returns ended or idle sessions that have prompts but no summary of their
+// latest activity. A session that was resumed after its end counts as ended only once it ends
+// again; otherwise it waits for the idle gap, or every scan would summarize it anew.
 func (s *Store) UnsummarizedSessions(ctx context.Context, idleBefore int64, limit int) ([]string, error) {
 	rows, err := s.db.QueryContext(ctx, `SELECT s.id FROM sessions s
 		WHERE (s.summarized_at IS NULL OR s.summarized_at < s.last_event_at) AND s.origin IS NULL
-		AND (s.ended_at IS NOT NULL OR s.last_event_at < ?)
+		AND (s.ended_at >= s.last_event_at OR s.last_event_at < ?)
 		AND EXISTS (SELECT 1 FROM events e WHERE e.session_id = s.id AND e.kind = 'prompt')
 		ORDER BY s.last_event_at DESC LIMIT ?`, idleBefore, limit)
 	if err != nil {
