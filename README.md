@@ -15,7 +15,7 @@ The concept and the reasoning behind the design are in [DESIGN.md](DESIGN.md).
 Prebuilt binaries for Linux and macOS (amd64, arm64) are on the [releases](https://github.com/tazhate/agent-mem/releases) page. Or build from source, which needs Go 1.26:
 
 ```bash
-go install github.com/tazhate/agent-mem/cmd/amem@latest
+go install github.com/tazhate/agent-mem/cmd/amem@master
 amem init
 ```
 

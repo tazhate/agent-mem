@@ -1,8 +1,16 @@
 # Changelog
 
-All notable changes to amem. Versions follow [semver](https://semver.org); while the major
-version is 0, a minor bump may change config keys or the database schema (migrations run on
-open).
+All notable changes to amem. A version is the release date, `YYYY.MM.DD`, tagged
+`vYYYY.MM.DD`; a second release on the same day adds `.1`, `.2`. Any release may change
+config keys or the database schema; migrations run when the database is opened.
+
+## [2026.11.09] - 2026-11-09
+
+### Changed
+
+- Versions are release dates instead of semver. The code is the same as 0.1.0.
+- Install from source with `go install github.com/tazhate/agent-mem/cmd/amem@master`:
+  Go modules only understand semver tags, so `@latest` would stay on v0.1.0.
 
 ## [0.1.0] - 2026-11-09
 
@@ -38,4 +46,5 @@ First release.
   `<private>` blocks before anything is stored; private prompts keep their whole turn out
   of the database.
 
+[2026.11.09]: https://github.com/tazhate/agent-mem/releases/tag/v2026.11.09
 [0.1.0]: https://github.com/tazhate/agent-mem/releases/tag/v0.1.0
