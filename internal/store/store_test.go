@@ -263,3 +263,23 @@ func TestScopedQueries(t *testing.T) {
 		}
 	}
 }
+
+func TestResumedSessionNotResummarized(t *testing.T) {
+	s := open(t)
+	ctx := t.Context()
+	now := time.Now().UnixMilli()
+	// Ended a day ago, summarized then, resumed a minute ago and still active.
+	for _, q := range []string{
+		`INSERT INTO sessions(id, runtime, native_id, started_at, last_event_at, ended_at, summarized_at) VALUES ('r', 'x', 'r', ?1 - 86400000, ?1 - 60000, ?1 - 86000000, ?1 - 86000000)`,
+		`INSERT INTO sessions(id, runtime, native_id, started_at, last_event_at, ended_at) VALUES ('e', 'x', 'e', ?1 - 3600000, ?1 - 60000, ?1 - 60000)`,
+		`INSERT INTO events(session_id, kind, ts) VALUES ('r', 'prompt', ?1), ('e', 'prompt', ?1)`,
+	} {
+		if _, err := s.DB().ExecContext(ctx, q, now); err != nil {
+			t.Fatal(err)
+		}
+	}
+	ids, err := s.UnsummarizedSessions(ctx, now-15*60_000, 10)
+	if err != nil || !slices.Equal(ids, []string{"e"}) {
+		t.Fatalf("unsummarized: %v %v", err, ids)
+	}
+}
