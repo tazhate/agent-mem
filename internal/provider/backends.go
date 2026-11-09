@@ -81,10 +81,15 @@ func (a *anthropic) Name() string { return a.name }
 func (a *anthropic) Complete(ctx context.Context, req Request) (json.RawMessage, error) {
 	url := cmp.Or(a.base, "https://api.anthropic.com") + "/v1/messages"
 	headers := map[string]string{"x-api-key": a.key, "anthropic-version": "2023-06-01"}
+	// The schema rides in output_config AND in the system prompt. Gateways
+	// exist that accept output_config with a 200 and then ignore it (z.ai with
+	// GLM models); without the prompt-side copy the model never sees any
+	// format instruction and answers in markdown.
+	system := req.System + schemaPrompt(req.Schema)
 	body := map[string]any{
 		"model":      cmp.Or(a.model, "claude-haiku-4-5"),
 		"max_tokens": cmp.Or(a.maxTokens, req.MaxTokens, 4096),
-		"system":     req.System,
+		"system":     system,
 		"messages":   []map[string]any{{"role": "user", "content": req.User}},
 		"output_config": map[string]any{
 			"format": map[string]any{"type": "json_schema", "schema": req.Schema},
@@ -92,9 +97,9 @@ func (a *anthropic) Complete(ctx context.Context, req Request) (json.RawMessage,
 	}
 	out, status, err := post(ctx, a.name, url, headers, body)
 	if err != nil && status == http.StatusBadRequest && strings.Contains(string(out), "output_config") {
-		// Models or gateways without structured outputs: ask for JSON in the prompt instead.
+		// Models or gateways without structured outputs: the prompt-side schema
+		// copy is already in the system message, just drop the config.
 		delete(body, "output_config")
-		body["system"] = req.System + schemaPrompt(req.Schema)
 		out, _, err = post(ctx, a.name, url, headers, body)
 	}
 	if err != nil {

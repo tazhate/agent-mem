@@ -176,5 +176,5 @@ func extractJSON(s string) (json.RawMessage, error) {
 // schemaPrompt is appended when a backend cannot enforce the schema itself.
 func schemaPrompt(schema map[string]any) string {
 	b, _ := json.Marshal(schema)
-	return "\n\nRespond with one JSON object only, no prose, matching this JSON schema:\n" + string(b)
+	return "\n\nRespond with one JSON object only, starting with `{`, no markdown, no code fences, no prose, matching this JSON schema:\n" + string(b)
 }
