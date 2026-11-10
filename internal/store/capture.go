@@ -90,13 +90,14 @@ func (s *Store) AdoptLegacy(ctx context.Context, projectID int64, name string) (
 }
 
 type Session struct {
-	ID         string
-	Runtime    string
-	ProjectID  int64
-	Turn       int
-	Started    int64
-	Ended      int64
-	Summarized int64
+	ID          string
+	Runtime     string
+	ProjectID   int64
+	Turn        int
+	Started     int64
+	LastEventAt int64
+	Ended       int64
+	Summarized  int64
 }
 
 // HasEvent reports whether an event with this hook id was already stored.
@@ -160,8 +161,8 @@ func (s *Store) GetSession(ctx context.Context, id string) (Session, error) {
 	var se Session
 	var ended, summ sql.NullInt64
 	var pid sql.NullInt64
-	err := s.db.QueryRowContext(ctx, `SELECT id, runtime, project_id, turn, started_at, ended_at, summarized_at
-		FROM sessions WHERE id = ?`, id).Scan(&se.ID, &se.Runtime, &pid, &se.Turn, &se.Started, &ended, &summ)
+	err := s.db.QueryRowContext(ctx, `SELECT id, runtime, project_id, turn, started_at, last_event_at, ended_at, summarized_at
+		FROM sessions WHERE id = ?`, id).Scan(&se.ID, &se.Runtime, &pid, &se.Turn, &se.Started, &se.LastEventAt, &ended, &summ)
 	se.ProjectID, se.Ended, se.Summarized = pid.Int64, ended.Int64, summ.Int64
 	return se, err
 }
