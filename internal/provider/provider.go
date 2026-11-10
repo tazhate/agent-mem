@@ -47,6 +47,13 @@ func permanent(name string, err error) error { return &Error{Provider: name, Err
 
 // New builds one provider from config. Secrets are resolved here, once.
 func New(ctx context.Context, c config.ProviderConfig) (Provider, error) {
+	return newProvider(ctx, c, config.Home())
+}
+
+func newProvider(ctx context.Context, c config.ProviderConfig, dataDir string) (Provider, error) {
+	if dataDir == "" {
+		dataDir = config.Home()
+	}
 	key, err := config.Resolve(ctx, c.Key)
 	if err != nil {
 		return nil, fmt.Errorf("provider %s key: %w", c.Name, err)
@@ -68,7 +75,7 @@ func New(ctx context.Context, c config.ProviderConfig) (Provider, error) {
 		if unset == nil && filepath.Base(c.Command[0]) == "claude" {
 			unset = ClaudeSubscriptionUnset
 		}
-		return &execProvider{name: name, command: c.Command, model: c.Model, unset: unset}, nil
+		return &execProvider{name: name, command: c.Command, model: c.Model, unset: unset, workDir: filepath.Join(dataDir, "exec-cwd")}, nil
 	}
 	return nil, fmt.Errorf("provider %s: unknown kind %q (anthropic, openai, exec)", name, c.Kind)
 }
@@ -82,10 +89,15 @@ type Chain struct {
 }
 
 func NewChain(ctx context.Context, cfgs []config.ProviderConfig) (*Chain, error) {
+	return NewChainWithDataDir(ctx, cfgs, config.Home())
+}
+
+// NewChainWithDataDir builds a chain whose exec providers share a neutral working directory.
+func NewChainWithDataDir(ctx context.Context, cfgs []config.ProviderConfig, dataDir string) (*Chain, error) {
 	var ch Chain
 	var errs []error
 	for _, c := range cfgs {
-		p, err := New(ctx, c)
+		p, err := newProvider(ctx, c, dataDir)
 		if err != nil {
 			errs = append(errs, err)
 			continue

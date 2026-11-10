@@ -30,6 +30,7 @@ type kick struct {
 type Observer struct {
 	st      *store.Store
 	cfg     config.ObserverConfig
+	dataDir string
 	rec     *recall.Engine
 	log     *slog.Logger
 	kicks   chan kick
@@ -45,8 +46,15 @@ type Observer struct {
 }
 
 func New(st *store.Store, cfg config.ObserverConfig, rec *recall.Engine, log *slog.Logger) *Observer {
-	return &Observer{st: st, cfg: cfg, rec: rec, log: log, kicks: make(chan kick, 256),
+	return &Observer{st: st, cfg: cfg, dataDir: config.Home(), rec: rec, log: log, kicks: make(chan kick, 256),
 		backoff: map[string]time.Time{}, fails: map[string]int{}}
+}
+
+// SetDataDir places provider runtime files under the configured data directory.
+func (o *Observer) SetDataDir(dir string) {
+	if dir != "" {
+		o.dataDir = dir
+	}
 }
 
 // SetRedactor masks secrets in model output before it is stored.
@@ -99,7 +107,7 @@ func (o *Observer) provider(ctx context.Context) (provider.Provider, error) {
 	if time.Since(o.provErr) < 5*time.Minute {
 		return nil, fmt.Errorf("observer provider unavailable")
 	}
-	ch, err := provider.NewChain(ctx, o.cfg.Providers)
+	ch, err := provider.NewChainWithDataDir(ctx, o.cfg.Providers, o.dataDir)
 	if err == nil {
 		ch.Timeout = o.cfg.Timeout.Duration
 	}

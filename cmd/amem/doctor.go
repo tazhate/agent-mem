@@ -98,7 +98,7 @@ func cmdDoctor(args []string) int {
 
 	ctx := context.Background()
 	if cfg.Observer.Enabled {
-		ch, err := provider.NewChain(ctx, cfg.Observer.Providers)
+		ch, err := provider.NewChainWithDataDir(ctx, cfg.Observer.Providers, cfg.DataDir)
 		if err != nil {
 			ok(false, "observer: %v", err)
 		} else {
