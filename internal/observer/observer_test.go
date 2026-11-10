@@ -48,8 +48,8 @@ func TestObserveTurn(t *testing.T) {
 			{SessionID: sid, Turn: 1, Kind: "prompt", Input: "why does the hook time out", TS: now + 1},
 			{SessionID: sid, Turn: 1, Kind: "tool_post", Tool: "Read", Input: `{"file_path":"/r/hooks.json"}`, Output: "{...}", TS: now + 2},
 			{SessionID: sid, Turn: 1, Kind: "tool_post", Tool: "Read", Input: `{"file_path":"/r/hooks.json"}`, Output: "{...}", TS: now + 3},
-			{SessionID: sid, Turn: 1, Kind: "tool_fail", Tool: "Bash", Input: `{"command":"npm install"}`, Error: "timeout", ExitCode: &exit1, TS: now + 4},
-			{SessionID: sid, Turn: 1, Kind: "turn_end", Output: "Raised the timeout to 60s.", TS: now + 5},
+			{SessionID: sid, Turn: 1, Kind: "tool_fail", Tool: "Bash", Input: `{"command":"npm install"}`, Error: "timeout", ExitCode: &exit1, TS: now + 5},
+			{SessionID: sid, Turn: 1, Kind: "turn_end", Output: "Raised the timeout to 60s.", TS: now + 4},
 			{SessionID: sid, Turn: 2, Kind: "prompt", Input: "<private>", Error: "private", TS: now + 6},
 			{SessionID: sid, Turn: 2, Kind: "tool_post", Tool: "Bash", Input: `{"command":"cat secrets"}`, Output: "s3cret", TS: now + 7},
 		} {
@@ -76,6 +76,9 @@ func TestObserveTurn(t *testing.T) {
 	mems, _ := st.SessionMemories(ctx, sid, 10)
 	if len(mems) != 1 || mems[0].Type != "gotcha" {
 		t.Fatalf("stored: %+v", mems)
+	}
+	if mems[0].CreatedAt != now+5 || mems[0].UpdatedAt != now+5 {
+		t.Fatalf("memory timestamps = %d/%d, want event maximum %d", mems[0].CreatedAt, mems[0].UpdatedAt, now+5)
 	}
 	got, _ := st.GetMemories(ctx, []int64{old})
 	if got[0].SupersededBy != mems[0].ID {
@@ -119,9 +122,10 @@ func TestChunkFailureDoesNotResendStoredChunks(t *testing.T) {
 	st.Write(ctx, func(tx *sql.Tx) error {
 		st.TouchSession(ctx, tx, sid, "claude-code", "c", pid, "/r", "", true, now)
 		for turn := 1; turn <= 2; turn++ {
-			st.InsertEvent(ctx, tx, store.EventRow{SessionID: sid, Turn: turn, Kind: "prompt", Input: strings.Repeat("x", 300), TS: now})
-			st.InsertEvent(ctx, tx, store.EventRow{SessionID: sid, Turn: turn, Kind: "tool_post", Tool: "Bash", Input: `{"command":"make"}`, Output: strings.Repeat("y", 300), TS: now})
-			st.InsertEvent(ctx, tx, store.EventRow{SessionID: sid, Turn: turn, Kind: "turn_end", Output: "done", TS: now})
+			ts := now + int64(turn*1000)
+			st.InsertEvent(ctx, tx, store.EventRow{SessionID: sid, Turn: turn, Kind: "prompt", Input: strings.Repeat("x", 300), TS: ts + 1})
+			st.InsertEvent(ctx, tx, store.EventRow{SessionID: sid, Turn: turn, Kind: "tool_post", Tool: "Bash", Input: `{"command":"make"}`, Output: strings.Repeat("y", 300), TS: ts + 3})
+			st.InsertEvent(ctx, tx, store.EventRow{SessionID: sid, Turn: turn, Kind: "turn_end", Output: "done", TS: ts + 2})
 		}
 		return nil
 	})
@@ -140,6 +144,15 @@ func TestChunkFailureDoesNotResendStoredChunks(t *testing.T) {
 	mems, _ := st.SessionMemories(ctx, sid, 10)
 	if len(mems) != 2 || f.calls != 3 {
 		t.Fatalf("memories=%d calls=%d (turn 1 must not be resent)", len(mems), f.calls)
+	}
+	for turn := 1; turn <= 2; turn++ {
+		var created int64
+		if err := st.DB().QueryRow(`SELECT created_at FROM memories WHERE session_id = ? AND turn = ?`, sid, turn).Scan(&created); err != nil {
+			t.Fatal(err)
+		}
+		if want := now + int64(turn*1000) + 3; created != want {
+			t.Fatalf("turn %d created_at = %d, want %d", turn, created, want)
+		}
 	}
 }
 
@@ -171,6 +184,47 @@ func TestSummaryGivesUp(t *testing.T) {
 	}
 	if b.calls != maxFailures {
 		t.Fatalf("summary attempts = %d, want %d then stop", b.calls, maxFailures)
+	}
+}
+
+func TestSummaryUsesSessionEventTime(t *testing.T) {
+	ctx := t.Context()
+	st, _ := store.Open(filepath.Join(t.TempDir(), "t.db"))
+	defer st.Close()
+	pid, _ := st.EnsureProject(ctx, "/r/.git", "r", "/r")
+	sid := "claude-code:old"
+	old := time.Now().Add(-30 * 24 * time.Hour).UnixMilli()
+	st.Write(ctx, func(tx *sql.Tx) error {
+		st.TouchSession(ctx, tx, sid, "claude-code", "old", pid, "/r", "", true, old)
+		st.InsertEvent(ctx, tx, store.EventRow{SessionID: sid, Turn: 1, Kind: "prompt", Input: "document the result", TS: old})
+		return st.EndSession(ctx, tx, sid, old)
+	})
+	f := &fake{resp: `{"request":"document the result","investigated":"events","learned":"timestamps","completed":"done","next_steps":"none"}`}
+	o := New(st, config.Default().Observer, recall.New(st, config.Default().Recall, nil), slog.New(slog.NewTextHandler(io.Discard, nil)))
+	o.SetProvider(f)
+	o.summarize(ctx, sid)
+	var created, summarized int64
+	if err := st.DB().QueryRow(`SELECT created_at FROM summaries WHERE session_id = ?`, sid).Scan(&created); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.DB().QueryRow(`SELECT summarized_at FROM sessions WHERE id = ?`, sid).Scan(&summarized); err != nil {
+		t.Fatal(err)
+	}
+	if created != old || summarized != old {
+		t.Fatalf("summary timestamps = %d/%d, want %d", created, summarized, old)
+	}
+	ids, err := st.UnsummarizedSessions(ctx, 0, 10)
+	if err != nil || len(ids) != 0 {
+		t.Fatalf("summarized session selected again: %v, %v", ids, err)
+	}
+	st.Write(ctx, func(tx *sql.Tx) error {
+		st.TouchSession(ctx, tx, sid, "claude-code", "old", pid, "/r", "", true, old+1000)
+		st.InsertEvent(ctx, tx, store.EventRow{SessionID: sid, Turn: 2, Kind: "prompt", Input: "continue", TS: old + 1000})
+		return st.EndSession(ctx, tx, sid, old+1000)
+	})
+	ids, err = st.UnsummarizedSessions(ctx, 0, 10)
+	if err != nil || len(ids) != 1 || ids[0] != sid {
+		t.Fatalf("resumed session not selected: %v, %v", ids, err)
 	}
 }
 

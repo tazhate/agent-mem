@@ -82,10 +82,63 @@ cat > /dev/null
 case "$2" in *'"ok"'*) ;; *) exit 4;; esac
 echo '{"type":"result","is_error":false,"result":"x","structured_output":{"ok":true}}'
 `), 0o755)
-	p, _ := New(t.Context(), config.ProviderConfig{Kind: "exec", Command: []string{script, "--json-schema", PhSchema, "--model", PhModel}})
+	p, _ := newProvider(t.Context(), config.ProviderConfig{Kind: "exec", Command: []string{script, "--json-schema", PhSchema, "--model", PhModel}}, dir)
 	out, err := p.Complete(t.Context(), Request{System: "s", User: "u", Schema: schema})
 	if err != nil || string(out) != `{"ok":true}` {
 		t.Fatalf("%s %v", out, err)
+	}
+}
+
+func TestExecUsesStableWorkingDirectory(t *testing.T) {
+	dir := t.TempDir()
+	scratch := filepath.Join(dir, "tmp")
+	projects := filepath.Join(dir, "projects")
+	if err := os.MkdirAll(scratch, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(projects, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("TMPDIR", scratch)
+	t.Setenv("AMEM_TEST_CWD_LOG", filepath.Join(dir, "cwds"))
+	t.Setenv("AMEM_TEST_PROJECTS", projects)
+	script := filepath.Join(dir, "fake-cli")
+	if err := os.WriteFile(script, []byte(`#!/bin/sh
+cat > /dev/null
+printf '%s\n' "$PWD" >> "$AMEM_TEST_CWD_LOG"
+mkdir -p "$AMEM_TEST_PROJECTS/$(pwd | tr '/' '-')"
+echo '{"ok":true}'
+`), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	p, err := newProvider(t.Context(), config.ProviderConfig{Kind: "exec", Command: []string{script}}, dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for range 2 {
+		if _, err := p.Complete(t.Context(), Request{Schema: schema}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	body, err := os.ReadFile(filepath.Join(dir, "cwds"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	cwds := strings.Split(strings.TrimSpace(string(body)), "\n")
+	workDir := filepath.Join(dir, "exec-cwd")
+	if len(cwds) != 2 || cwds[0] != workDir || cwds[1] != workDir {
+		t.Fatalf("working directories = %q, want two calls in %q", cwds, workDir)
+	}
+	entries, err := os.ReadDir(projects)
+	if err != nil || len(entries) != 1 {
+		t.Fatalf("fake CLI project directories = %d, %v", len(entries), err)
+	}
+	leftovers, err := os.ReadDir(scratch)
+	if err != nil || len(leftovers) != 0 {
+		t.Fatalf("per-call scratch directories left behind = %d, %v", len(leftovers), err)
+	}
+	if st, err := os.Stat(workDir); err != nil || !st.IsDir() {
+		t.Fatalf("stable working directory removed: %v", err)
 	}
 }
 
@@ -128,7 +181,7 @@ func TestExecKillsProcessGroup(t *testing.T) {
 	script := filepath.Join(dir, "hang")
 	// A grandchild keeps stdout open; without killing the group Run would wait for it.
 	os.WriteFile(script, []byte("#!/bin/sh\nsleep 30 &\nsleep 30\n"), 0o755)
-	p, _ := New(t.Context(), config.ProviderConfig{Kind: "exec", Command: []string{script}})
+	p, _ := newProvider(t.Context(), config.ProviderConfig{Kind: "exec", Command: []string{script}}, dir)
 	ctx, cancel := context.WithTimeout(t.Context(), 300*time.Millisecond)
 	defer cancel()
 	start := time.Now()
@@ -170,7 +223,7 @@ echo '{"type":"result","is_error":false,"structured_output":{"ok":true}}'
 	t.Setenv("ANTHROPIC_BASE_URL", "https://api.z.ai/api/anthropic")
 	t.Setenv("ANTHROPIC_API_KEY", "sk-test")
 	t.Setenv("ANTHROPIC_DEFAULT_HAIKU_MODEL", "glm-5.3-flash")
-	p, _ := New(t.Context(), config.ProviderConfig{Kind: "exec", Command: []string{script}})
+	p, _ := newProvider(t.Context(), config.ProviderConfig{Kind: "exec", Command: []string{script}}, dir)
 	if out, err := p.Complete(t.Context(), Request{Schema: schema}); err != nil || string(out) != `{"ok":true}` {
 		t.Fatalf("%s %v", out, err)
 	}
@@ -214,7 +267,7 @@ func TestExecLingeringChildKeepsAnswer(t *testing.T) {
 	script := filepath.Join(dir, "linger")
 	// Answers and exits 0, but a background child keeps stdout open past WaitDelay.
 	os.WriteFile(script, []byte("#!/bin/sh\necho '{\"ok\":true}'\nsleep 30 &\nexit 0\n"), 0o755)
-	p, _ := New(t.Context(), config.ProviderConfig{Kind: "exec", Command: []string{script}})
+	p, _ := newProvider(t.Context(), config.ProviderConfig{Kind: "exec", Command: []string{script}}, dir)
 	out, err := p.Complete(t.Context(), Request{Schema: schema})
 	if err != nil || !strings.Contains(string(out), "ok") {
 		t.Fatalf("answer lost: %v %s", err, out)

@@ -21,6 +21,7 @@ type turn struct {
 	assistant string
 	files     []string
 	chars     int
+	endTS     int64
 }
 
 func lastTurnEnd(evs []store.EventRow) int {
@@ -62,6 +63,7 @@ func buildTurns(evs []store.EventRow) []turn {
 			idx[e.Turn] = i
 		}
 		t := &out[i]
+		t.endTS = max(t.endTS, e.TS)
 		switch event.Kind(e.Kind) {
 		case event.Prompt:
 			t.prompt = e.Input

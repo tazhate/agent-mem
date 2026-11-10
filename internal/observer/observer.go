@@ -30,6 +30,7 @@ type kick struct {
 type Observer struct {
 	st      *store.Store
 	cfg     config.ObserverConfig
+	dataDir string
 	rec     *recall.Engine
 	log     *slog.Logger
 	kicks   chan kick
@@ -45,8 +46,15 @@ type Observer struct {
 }
 
 func New(st *store.Store, cfg config.ObserverConfig, rec *recall.Engine, log *slog.Logger) *Observer {
-	return &Observer{st: st, cfg: cfg, rec: rec, log: log, kicks: make(chan kick, 256),
+	return &Observer{st: st, cfg: cfg, dataDir: config.Home(), rec: rec, log: log, kicks: make(chan kick, 256),
 		backoff: map[string]time.Time{}, fails: map[string]int{}}
+}
+
+// SetDataDir places provider runtime files under the configured data directory.
+func (o *Observer) SetDataDir(dir string) {
+	if dir != "" {
+		o.dataDir = dir
+	}
 }
 
 // SetRedactor masks secrets in model output before it is stored.
@@ -99,7 +107,7 @@ func (o *Observer) provider(ctx context.Context) (provider.Provider, error) {
 	if time.Since(o.provErr) < 5*time.Minute {
 		return nil, fmt.Errorf("observer provider unavailable")
 	}
-	ch, err := provider.NewChain(ctx, o.cfg.Providers)
+	ch, err := provider.NewChainWithDataDir(ctx, o.cfg.Providers, o.dataDir)
 	if err == nil {
 		ch.Timeout = o.cfg.Timeout.Duration
 	}
@@ -247,8 +255,9 @@ func (o *Observer) observe(ctx context.Context, prov provider.Provider, sess sto
 		shown[m.ID] = true
 	}
 	stored := 0
+	lastTurn := turns[len(turns)-1]
 	for _, d := range drafts {
-		m := d.memory(sess, turns[len(turns)-1].n, o.clean)
+		m := d.memory(sess, lastTurn, o.clean)
 		if m == nil {
 			continue
 		}
@@ -372,6 +381,7 @@ func (o *Observer) summarize(ctx context.Context, sid string) {
 	}
 	delete(o.fails, key)
 	su.SessionID, su.ProjectID, su.ID = sid, sess.ProjectID, 0
+	su.CreatedAt = sess.LastEventAt
 	for _, f := range []*string{&su.Request, &su.Investigated, &su.Learned, &su.Completed, &su.NextSteps, &su.Notes} {
 		*f = o.clean(*f)
 	}
@@ -391,7 +401,7 @@ type draft struct {
 	Replaces []int64  `json:"replaces"`
 }
 
-func (d draft) memory(sess store.Session, turn int, clean func(string) string) *store.Memory {
+func (d draft) memory(sess store.Session, t turn, clean func(string) string) *store.Memory {
 	d.Title, d.Body = clean(d.Title), clean(d.Body)
 	for _, l := range [][]string{d.Facts, d.Files} {
 		for i := range l {
@@ -407,9 +417,9 @@ func (d draft) memory(sess store.Session, turn int, clean func(string) string) *
 		typ = "discovery"
 	}
 	m := &store.Memory{
-		ProjectID: sess.ProjectID, SessionID: sess.ID, Turn: turn, Type: typ, Title: title,
+		ProjectID: sess.ProjectID, SessionID: sess.ID, Turn: t.n, Type: typ, Title: title,
 		Body: clip(strings.TrimSpace(d.Body), 1500), Facts: clipList(d.Facts, 10, 300), Files: clipList(d.Files, 20, 400),
-		Origin: "observer",
+		CreatedAt: t.endTS, Origin: "observer",
 	}
 	return m
 }

@@ -16,6 +16,8 @@ import (
 	"strings"
 	"syscall"
 	"time"
+
+	"github.com/tazhate/agent-mem/internal/config"
 )
 
 var httpClient = &http.Client{Timeout: 3 * time.Minute}
@@ -229,6 +231,7 @@ type execProvider struct {
 	command []string
 	model   string
 	unset   []string
+	workDir string
 }
 
 // ClaudeSubscriptionUnset keeps `claude -p` on the user's own login: with any of these set it
@@ -242,6 +245,13 @@ var ClaudeSubscriptionUnset = []string{
 func (e *execProvider) Name() string { return e.name }
 
 func (e *execProvider) Complete(ctx context.Context, req Request) (json.RawMessage, error) {
+	workDir := e.workDir
+	if workDir == "" {
+		workDir = filepath.Join(config.Home(), "exec-cwd")
+	}
+	if err := os.MkdirAll(workDir, 0o700); err != nil {
+		return nil, permanent(e.name, err)
+	}
 	dir, err := os.MkdirTemp("", "amem-exec-")
 	if err != nil {
 		return nil, permanent(e.name, err)
@@ -277,7 +287,7 @@ func (e *execProvider) Complete(ctx context.Context, req Request) (json.RawMessa
 		prompt += schemaPrompt(req.Schema)
 	}
 	cmd := exec.CommandContext(ctx, args[0], args[1:]...)
-	cmd.Dir = dir
+	cmd.Dir = workDir
 	// CLIs spawn helpers that inherit stdout; kill the whole process group on timeout and stop
 	// waiting for pipes shortly after, or one hung grandchild blocks the observer forever.
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}

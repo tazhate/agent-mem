@@ -383,7 +383,7 @@ func (s *Server) projectFor(ctx context.Context, cwd string) (int64, project.Inf
 	s.projects[info.Key] = id
 	first := !s.adopted[id]
 	s.mu.Unlock()
-	if first && info.Git {
+	if first {
 		merged, err := s.st.AdoptLegacy(ctx, id, info.Name)
 		if err == nil {
 			s.mu.Lock()
@@ -400,6 +400,22 @@ func (s *Server) projectFor(ctx context.Context, cwd string) (int64, project.Inf
 	return id, info, nil
 }
 
+// projectForSession keeps a session on its original project when later events report another cwd.
+func (s *Server) projectForSession(ctx context.Context, sid, cwd string) (int64, project.Info, error) {
+	sess, err := s.st.GetSession(ctx, sid)
+	if err != nil && !errors.Is(err, sql.ErrNoRows) {
+		return 0, project.Info{}, err
+	}
+	if err == nil && sess.ProjectID != 0 {
+		p, err := s.st.ProjectByID(ctx, sess.ProjectID)
+		if err != nil {
+			return 0, project.Info{}, err
+		}
+		return p.ID, project.Info{Key: p.Key, Name: p.Name, Root: p.Root}, nil
+	}
+	return s.projectFor(ctx, cwd)
+}
+
 // ownTool matches amem's MCP tools under any runtime's naming: memory_get, mcp__amem__memory_get
 // (Claude Code, Codex), mcp_amem_memory_get (Gemini CLI), amem_memory_get (OpenCode).
 var ownTool = regexp.MustCompile(`(^|_)(memory_search|memory_get|memory_timeline|memory_save|work_state)$`)
@@ -411,13 +427,13 @@ func (s *Server) ingest(ctx context.Context, ev *event.Event, live bool) (string
 		ev.TS = event.NowMS()
 	}
 	sid := ev.SessionID()
-	pid, info, err := s.projectFor(ctx, ev.Cwd)
-	if err != nil {
-		return "", "", nil, err
-	}
-	// Cheap duplicate check before the expensive cleaning (redelivery after a hook timeout).
+	// Cheap duplicate check before project resolution and expensive cleaning (redelivery after a hook timeout).
 	if seen, err := s.st.SeenEvent(ctx, ev.ID); err == nil && seen {
 		return "", "", nil, nil
+	}
+	pid, info, err := s.projectForSession(ctx, sid, ev.Cwd)
+	if err != nil {
+		return "", "", nil, err
 	}
 	privatePrompt := s.clean(ev)
 

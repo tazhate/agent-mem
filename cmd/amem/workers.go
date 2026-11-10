@@ -15,6 +15,7 @@ import (
 func attachWorkers(cfg *config.Config, srv *daemon.Server, log *slog.Logger) {
 	if cfg.Observer.Enabled {
 		obs := observer.New(srv.Store(), cfg.Observer, srv.Recall(), log.With("worker", "observer"))
+		obs.SetDataDir(cfg.DataDir)
 		if cfg.Capture.Redact {
 			obs.SetRedactor(redact.New(cfg.Capture.RedactGeneric))
 		}
