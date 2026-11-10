@@ -50,8 +50,8 @@ func (s *Store) ProjectByID(ctx context.Context, id int64) (Project, error) {
 	return p, err
 }
 
-// AdoptLegacy merges an imported "legacy:<name>" project into a live git project with the same
-// name, when exactly one legacy project matches. Called when a session from a git repo starts.
+// AdoptLegacy merges an imported "legacy:<name>" project into a live project with the same
+// name, when exactly one non-legacy project matches. Called when a session starts in that project.
 func (s *Store) AdoptLegacy(ctx context.Context, projectID int64, name string) (bool, error) {
 	var legacyID int64
 	err := s.db.QueryRowContext(ctx, `SELECT id FROM projects WHERE key = ?`, "legacy:"+name).Scan(&legacyID)

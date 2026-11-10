@@ -118,6 +118,84 @@ func TestRecallFlow(t *testing.T) {
 	}
 }
 
+func TestProjectForAdoptsLegacyPlainDirectory(t *testing.T) {
+	s, _ := newServer(t, "on")
+	ctx := t.Context()
+	plain := filepath.Join(t.TempDir(), "plain")
+	if err := os.Mkdir(plain, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	legacyID, err := s.st.EnsureProject(ctx, "legacy:plain", "plain", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	memoryID, _, err := s.st.InsertMemory(ctx, &store.Memory{ProjectID: legacyID, Type: "discovery", Title: "imported fact"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	projectID, info, err := s.projectFor(ctx, plain)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if info.Git || projectID == legacyID {
+		t.Fatalf("plain project resolution: %+v, id=%d legacy=%d", info, projectID, legacyID)
+	}
+	var gotProject int64
+	if err := s.st.DB().QueryRow(`SELECT project_id FROM memories WHERE id = ?`, memoryID).Scan(&gotProject); err != nil {
+		t.Fatal(err)
+	}
+	if gotProject != projectID {
+		t.Fatalf("memory project = %d, want %d", gotProject, projectID)
+	}
+	var legacyRows, aliasRows int
+	s.st.DB().QueryRow(`SELECT count(*) FROM projects WHERE id = ?`, legacyID).Scan(&legacyRows)
+	s.st.DB().QueryRow(`SELECT count(*) FROM project_aliases WHERE alias = 'legacy:plain' AND project_id = ?`, projectID).Scan(&aliasRows)
+	if legacyRows != 0 || aliasRows != 1 {
+		t.Fatalf("legacy merge left projects=%d aliases=%d", legacyRows, aliasRows)
+	}
+}
+
+func TestIngestCwdChurnKeepsSessionProject(t *testing.T) {
+	s, _ := newServer(t, "on")
+	ctx := t.Context()
+	root := filepath.Join(t.TempDir(), "plain-root")
+	child := filepath.Join(root, "child")
+	grandchild := filepath.Join(child, "grandchild")
+	if err := os.MkdirAll(grandchild, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	for i, cwd := range []string{root, child, grandchild} {
+		ev := &event.Event{Runtime: "claude-code", NativeSession: "churn", Cwd: cwd, Kind: event.ToolPost, ID: event.NewID(),
+			Tool: &event.Tool{Name: "Bash", Input: json.RawMessage(`{"command":"pwd"}`)}, TS: int64(i + 1)}
+		if i == 0 {
+			ev.Kind = event.SessionStart
+			ev.Tool = nil
+		}
+		if _, err := ingestCommit(s, ctx, ev, false); err != nil {
+			t.Fatal(err)
+		}
+	}
+	var projects int
+	if err := s.st.DB().QueryRow(`SELECT count(*) FROM projects`).Scan(&projects); err != nil || projects != 1 {
+		t.Fatalf("projects after cwd changes = %d, %v", projects, err)
+	}
+	sess, err := s.st.GetSession(ctx, "claude-code:churn")
+	if err != nil {
+		t.Fatal(err)
+	}
+	p, err := s.st.ProjectByID(ctx, sess.ProjectID)
+	if err != nil || p.Key != root {
+		t.Fatalf("session project = %+v, %v; want %s", p, err, root)
+	}
+	other := &event.Event{Runtime: "claude-code", NativeSession: "other", Cwd: child, Kind: event.SessionStart, ID: event.NewID(), TS: 4}
+	if _, err := ingestCommit(s, ctx, other, false); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.st.DB().QueryRow(`SELECT count(*) FROM projects`).Scan(&projects); err != nil || projects != 2 {
+		t.Fatalf("a distinct session did not get its plain-directory project: %d, %v", projects, err)
+	}
+}
+
 func TestShadowMode(t *testing.T) {
 	s, repo := newServer(t, "shadow")
 	seed(t, s, repo)

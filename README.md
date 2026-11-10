@@ -59,7 +59,7 @@ During the migration:
 - the 100+ ad hoc claude-mem types are reduced to seven: `decision`, `bugfix`, `gotcha`, `change`, `discovery`, `preference`, `todo`. The original type is kept in `meta.orig_type`;
 - observations without a live session get a synthetic session per day;
 - worktree projects (`api/wt-feature`) are merged into their repository;
-- projects with no recorded path become `legacy:<name>` and merge on their own once a session starts in a repository with that name.
+- projects with no recorded path become `legacy:<name>` and merge on their own once a session starts in a project with that name.
 
 Chroma is not migrated. MiniLM vectors do poorly on Russian, and the embedder you pick recomputes them.
 
