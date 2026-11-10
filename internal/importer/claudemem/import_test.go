@@ -2,6 +2,7 @@ package claudemem
 
 import (
 	"database/sql"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -74,5 +75,124 @@ func TestImportRedactsAndMaps(t *testing.T) {
 	again, _ := Run(t.Context(), dst, Options{Source: srcPath, Clean: r.Clean})
 	if again.Memories != 0 || again.Prompts != 0 || again.Summaries != 0 {
 		t.Fatalf("re-run not idempotent: %+v", again)
+	}
+}
+
+func makeSource(t *testing.T, schema string) string {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), "source.db")
+	src, err := sql.Open("sqlite", path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer src.Close()
+	schema = strings.NewReplacer("GHPPREFIX", "ghp"+"_", "ANTPREFIX", "sk-"+"ant-").Replace(schema)
+	if _, err := src.Exec(schema); err != nil {
+		t.Fatal(err)
+	}
+	return path
+}
+
+func legacySourceSchema() string {
+	r := strings.NewReplacer(
+		"project TEXT, cwd TEXT, observed_model TEXT, started_at_epoch INTEGER", "project TEXT, started_at_epoch INTEGER",
+		"INSERT INTO sdk_sessions VALUES (1, 'c1', 'm1', 'claude', 'proj/wt-x', NULL, NULL, 1000, 2000);",
+		"INSERT INTO sdk_sessions VALUES (1, 'c1', 'm1', 'claude', 'proj/wt-x', 1000, 2000);",
+		"CREATE TABLE work_state_entries (id INTEGER PRIMARY KEY, project TEXT, list_name TEXT, fields TEXT, created_at_epoch INTEGER);\n", "",
+		"INSERT INTO work_state_entries VALUES (1, 'proj', 'todo', '{\"task\":\"x\",\"status\":\"todo\"}', 1300);\n", "",
+	)
+	return r.Replace(srcSchema)
+}
+
+func TestImportLegacySchema(t *testing.T) {
+	srcPath := makeSource(t, legacySourceSchema())
+	for _, dryRun := range []bool{false, true} {
+		dst, err := store.Open(filepath.Join(t.TempDir(), "amem.db"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		rep, err := Run(t.Context(), dst, Options{Source: srcPath, DryRun: dryRun})
+		if err != nil {
+			dst.Close()
+			t.Fatalf("dry-run %v: %v", dryRun, err)
+		}
+		if rep.Sessions != 1 || rep.Memories != 2 || rep.Orphans != 1 || rep.Summaries != 1 || rep.Prompts != 2 || rep.Work != 0 {
+			dst.Close()
+			t.Fatalf("dry-run %v report: %+v", dryRun, rep)
+		}
+		if dryRun {
+			var n int
+			if err := dst.DB().QueryRow(`SELECT count(*) FROM projects`).Scan(&n); err != nil || n != 0 {
+				t.Fatalf("dry-run wrote %d projects: %v", n, err)
+			}
+		} else {
+			var cwd, model sql.NullString
+			if err := dst.DB().QueryRow(`SELECT cwd, model FROM sessions WHERE id = 'claude-code:c1'`).Scan(&cwd, &model); err != nil {
+				t.Fatal(err)
+			}
+			if cwd.Valid || model.Valid {
+				t.Fatalf("missing source columns became cwd=%v model=%v", cwd, model)
+			}
+			again, err := Run(t.Context(), dst, Options{Source: srcPath})
+			if err != nil || again.Memories != 0 || again.Sessions != 0 || again.Summaries != 0 || again.Prompts != 0 {
+				t.Fatalf("re-run not idempotent: %+v, %v", again, err)
+			}
+		}
+		dst.Close()
+	}
+}
+
+func TestLocateAcceptsPlainDirectories(t *testing.T) {
+	root := t.TempDir()
+	plain := filepath.Join(root, "plain")
+	if err := os.Mkdir(plain, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	im := importer{opt: Options{ProjectMap: map[string]string{"plain": plain}}}
+	info, ok := im.locate("plain", nil)
+	if !ok || info.Git || info.Key != plain || info.Root != plain {
+		t.Fatalf("explicit plain directory: %+v, %v", info, ok)
+	}
+	im = importer{}
+	info, ok = im.locate("plain", []string{plain})
+	if !ok || info.Git || info.Key != plain {
+		t.Fatalf("recorded plain cwd: %+v, %v", info, ok)
+	}
+	im = importer{opt: Options{SearchRoots: []string{root}}}
+	if info, ok = im.locate("plain", nil); ok {
+		t.Fatalf("search roots accepted a plain directory: %+v", info)
+	}
+	if err := os.Mkdir(filepath.Join(plain, ".git"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if info, ok = im.locate("plain", nil); !ok || !info.Git {
+		t.Fatalf("search roots rejected git directory: %+v, %v", info, ok)
+	}
+}
+
+func TestImportProjectMapPlainDirectory(t *testing.T) {
+	srcPath := makeSource(t, srcSchema)
+	plain := filepath.Join(t.TempDir(), "plain")
+	if err := os.Mkdir(plain, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	dst, err := store.Open(filepath.Join(t.TempDir(), "amem.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer dst.Close()
+	rep, err := Run(t.Context(), dst, Options{Source: srcPath, ProjectMap: map[string]string{"proj": plain}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if rep.MappedProjects != 1 || rep.LegacyProjects != 0 {
+		t.Fatalf("project report: %+v", rep)
+	}
+	var key string
+	if err := dst.DB().QueryRow(`SELECT p.key FROM projects p JOIN sessions s ON s.project_id = p.id WHERE s.id = 'claude-code:c1'`).Scan(&key); err != nil {
+		t.Fatal(err)
+	}
+	if key != plain {
+		t.Fatalf("session project key = %q, want %q", key, plain)
 	}
 }

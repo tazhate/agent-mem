@@ -74,12 +74,10 @@ func cmdImport(args []string) int {
 	fmt.Fprintf(os.Stderr, "importing %s -> %s%s\n", *src, cfg.DBPath(), map[bool]string{true: " (dry run)"}[*dry])
 	rep, err := claudemem.Run(context.Background(), st, opt)
 	fmt.Fprintln(os.Stderr)
-	if rep != nil {
-		rep.Print(os.Stdout)
-	}
 	if err != nil {
 		return fail("%v", err)
 	}
+	rep.Print(os.Stdout)
 	return 0
 }
 

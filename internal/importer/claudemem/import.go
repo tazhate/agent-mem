@@ -39,21 +39,21 @@ type Options struct {
 }
 
 type Report struct {
-	Sessions, OrphanSessions      int
-	Memories, Duplicates, Skipped int
-	Orphans                       int
-	Summaries, Prompts, Work, Raw int
-	Types                         map[string]int
-	Projects                      map[string]string // claude-mem base name -> amem project key
-	LegacyProjects, GitProjects   int
-	Elapsed                       time.Duration
+	Sessions, OrphanSessions       int
+	Memories, Duplicates, Skipped  int
+	Orphans                        int
+	Summaries, Prompts, Work, Raw  int
+	Types                          map[string]int
+	Projects                       map[string]string // claude-mem base name -> amem project key
+	LegacyProjects, MappedProjects int
+	Elapsed                        time.Duration
 }
 
 func (r *Report) Print(w io.Writer) {
 	fmt.Fprintf(w, "sessions:   %d (+%d synthetic for orphaned observations)\n", r.Sessions, r.OrphanSessions)
 	fmt.Fprintf(w, "memories:   %d new, %d duplicates dropped, %d skipped (empty), %d were orphans\n", r.Memories, r.Duplicates, r.Skipped, r.Orphans)
 	fmt.Fprintf(w, "summaries:  %d   prompts: %d   work entries: %d   raw tool uses: %d\n", r.Summaries, r.Prompts, r.Work, r.Raw)
-	fmt.Fprintf(w, "projects:   %d mapped to git repos, %d kept as legacy:<name> (merge automatically when a session starts in a repo of that name)\n", r.GitProjects, r.LegacyProjects)
+	fmt.Fprintf(w, "projects:   %d mapped to directories, %d kept as legacy:<name> (merge automatically when a session starts in a project of that name)\n", r.MappedProjects, r.LegacyProjects)
 	fmt.Fprintln(w, "types:")
 	for _, t := range slices.Sorted(maps.Keys(r.Types)) {
 		fmt.Fprintf(w, "  %-11s %d\n", t, r.Types[t])
@@ -71,6 +71,7 @@ type importer struct {
 	// sessions keyed by claude-mem memory_session_id and content_session_id
 	byMemory  map[string]sessionInfo
 	byContent map[string]sessionInfo
+	schema    map[string]map[string]bool
 }
 
 type sessionInfo struct {
@@ -97,6 +98,9 @@ func Run(ctx context.Context, dst *store.Store, opt Options) (*Report, error) {
 		proj:      map[string]int64{},
 		byMemory:  map[string]sessionInfo{},
 		byContent: map[string]sessionInfo{},
+	}
+	if err := im.loadSchema(ctx); err != nil {
+		return im.rep, fmt.Errorf("schema: %w", err)
 	}
 	steps := []struct {
 		name string
@@ -131,6 +135,60 @@ func Run(ctx context.Context, dst *store.Store, opt Options) (*Report, error) {
 	return im.rep, nil
 }
 
+func (im *importer) loadSchema(ctx context.Context) error {
+	rows, err := im.src.QueryContext(ctx, `SELECT name FROM sqlite_master WHERE type = 'table'`)
+	if err != nil {
+		return err
+	}
+	var tables []string
+	for rows.Next() {
+		var name string
+		if err := rows.Scan(&name); err != nil {
+			rows.Close()
+			return err
+		}
+		tables = append(tables, name)
+	}
+	rows.Close()
+	if err := rows.Err(); err != nil {
+		return err
+	}
+	im.schema = make(map[string]map[string]bool, len(tables))
+	for _, table := range tables {
+		cols, err := im.src.QueryContext(ctx, `SELECT name FROM pragma_table_info(?)`, table)
+		if err != nil {
+			return err
+		}
+		im.schema[table] = map[string]bool{}
+		for cols.Next() {
+			var name string
+			if err := cols.Scan(&name); err != nil {
+				cols.Close()
+				return err
+			}
+			im.schema[table][name] = true
+		}
+		cols.Close()
+		if err := cols.Err(); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (im *importer) hasTable(table string) bool {
+	_, ok := im.schema[table]
+	return ok
+}
+
+// textColumn selects a nullable text column, or an empty string when an old source lacks it.
+func (im *importer) textColumn(table, column string) string {
+	if im.schema[table][column] {
+		return "coalesce(" + column + ", '')"
+	}
+	return "''"
+}
+
 // baseProject strips the worktree suffix claude-mem appends ("api/wt-feature" -> "api").
 func baseProject(project, merged string) string {
 	p := cmp.Or(strings.TrimSpace(merged), strings.TrimSpace(project))
@@ -149,11 +207,23 @@ func (im *importer) write(ctx context.Context, fn func(tx *sql.Tx) error) error 
 }
 
 func (im *importer) projects(ctx context.Context) error {
-	rows, err := im.src.QueryContext(ctx, `
-		SELECT project, coalesce(merged_into_project,''), '' FROM observations GROUP BY 1, 2
-		UNION SELECT project, '', coalesce(cwd,'') FROM sdk_sessions
-		UNION SELECT project, coalesce(merged_into_project,''), '' FROM session_summaries GROUP BY 1, 2
-		UNION SELECT project, '', '' FROM work_state_entries GROUP BY 1`)
+	var selects []string
+	if im.hasTable("observations") {
+		selects = append(selects, fmt.Sprintf(`SELECT project, %s, '' FROM observations GROUP BY 1, 2`, im.textColumn("observations", "merged_into_project")))
+	}
+	if im.hasTable("sdk_sessions") {
+		selects = append(selects, fmt.Sprintf(`SELECT project, '', %s FROM sdk_sessions`, im.textColumn("sdk_sessions", "cwd")))
+	}
+	if im.hasTable("session_summaries") {
+		selects = append(selects, fmt.Sprintf(`SELECT project, %s, '' FROM session_summaries GROUP BY 1, 2`, im.textColumn("session_summaries", "merged_into_project")))
+	}
+	if im.hasTable("work_state_entries") {
+		selects = append(selects, `SELECT project, '', '' FROM work_state_entries GROUP BY 1`)
+	}
+	if len(selects) == 0 {
+		return nil
+	}
+	rows, err := im.src.QueryContext(ctx, strings.Join(selects, "\nUNION "))
 	if err != nil {
 		return err
 	}
@@ -185,7 +255,7 @@ func (im *importer) projects(ctx context.Context) error {
 		key, name, root := "legacy:"+base, base, ""
 		if ok {
 			key, name, root = info.Key, info.Name, info.Root
-			im.rep.GitProjects++
+			im.rep.MappedProjects++
 		} else {
 			im.rep.LegacyProjects++
 		}
@@ -213,23 +283,26 @@ func (im *importer) projects(ctx context.Context) error {
 	return nil
 }
 
-// locate finds the git repository of a claude-mem project: explicit map, recorded cwds, then
-// <root>/<name> under the search roots.
+// locate finds a claude-mem project: explicit map and recorded cwds may be any directory;
+// automatic matches under search roots stay git-only to avoid same-name collisions.
 func (im *importer) locate(base string, cwds []string) (project.Info, bool) {
 	var cands []string
 	if p, ok := im.opt.ProjectMap[base]; ok {
 		cands = append(cands, p)
 	}
 	cands = append(cands, cwds...)
-	for _, r := range im.opt.SearchRoots {
-		cands = append(cands, filepath.Join(r, base))
-	}
 	for _, c := range cands {
 		if st, err := os.Stat(c); err != nil || !st.IsDir() {
 			continue
 		}
-		info := project.Resolve(c)
-		if info.Git {
+		return project.Resolve(c), true
+	}
+	for _, r := range im.opt.SearchRoots {
+		c := filepath.Join(r, base)
+		if st, err := os.Stat(c); err != nil || !st.IsDir() {
+			continue
+		}
+		if info := project.Resolve(c); info.Git {
 			return info, true
 		}
 	}
@@ -245,9 +318,12 @@ func runtimeName(platform string) string {
 }
 
 func (im *importer) sessions(ctx context.Context) error {
-	rows, err := im.src.QueryContext(ctx, `SELECT content_session_id, coalesce(memory_session_id,''), coalesce(platform_source,''),
-		coalesce(project,''), coalesce(cwd,''), coalesce(observed_model,''), started_at_epoch, coalesce(completed_at_epoch, 0)
-		FROM sdk_sessions`)
+	if !im.hasTable("sdk_sessions") {
+		return nil
+	}
+	rows, err := im.src.QueryContext(ctx, fmt.Sprintf(`SELECT content_session_id, coalesce(memory_session_id,''), coalesce(platform_source,''),
+		coalesce(project,''), %s, %s, started_at_epoch, coalesce(completed_at_epoch, 0)
+		FROM sdk_sessions`, im.textColumn("sdk_sessions", "cwd"), im.textColumn("sdk_sessions", "observed_model")))
 	if err != nil {
 		return err
 	}
@@ -580,6 +656,10 @@ func (im *importer) prompts(ctx context.Context) error {
 }
 
 func (im *importer) work(ctx context.Context) error {
+	if !im.hasTable("work_state_entries") {
+		fmt.Fprintln(im.log, "  work state     skipped: source table is absent")
+		return nil
+	}
 	rows, err := im.src.QueryContext(ctx, `SELECT id, coalesce(project,''), list_name, fields, created_at_epoch FROM work_state_entries ORDER BY id`)
 	if err != nil {
 		return err
