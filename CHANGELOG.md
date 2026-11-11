@@ -4,6 +4,18 @@ All notable changes to amem. A version is the release date, `YYYY.MM.DD`, tagged
 `vYYYY.MM.DD`; a second release on the same day adds `.1`, `.2`. Any release may change
 config keys or the database schema; migrations run when the database is opened.
 
+## [2026.11.11] - 2026-11-11
+
+### Fixed
+
+- Keep sessions on their original project when later events report another working directory,
+  and adopt matching legacy projects for non-git directories too.
+- Preserve event timestamps during observer backfill for memories and summaries.
+- Put the JSON schema in the system prompt for Anthropic-compatible gateways that ignore
+  `output_config`.
+- Reuse a stable working directory for exec-based observer providers.
+- Support legacy claude-mem import schemas and print the import report only after success.
+
 ## [2026.11.09] - 2026-11-09
 
 ### Changed
@@ -46,5 +58,6 @@ First release.
   `<private>` blocks before anything is stored; private prompts keep their whole turn out
   of the database.
 
+[2026.11.11]: https://github.com/tazhate/agent-mem/releases/tag/v2026.11.11
 [2026.11.09]: https://github.com/tazhate/agent-mem/releases/tag/v2026.11.09
 [0.1.0]: https://github.com/tazhate/agent-mem/releases/tag/v0.1.0
