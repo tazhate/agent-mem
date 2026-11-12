@@ -401,6 +401,10 @@ func (s *Server) projectFor(ctx context.Context, cwd string) (int64, project.Inf
 }
 
 // projectForSession keeps a session on its original project when later events report another cwd.
+// A session still pinned to an imported "legacy:<name>" project is the exception: resolving the
+// reported cwd runs adoption, which merges the legacy project - session included - into the live
+// one when the names match. Without it a resumed imported session could never leave its legacy
+// project, because the early return below never resolves the live cwd.
 func (s *Server) projectForSession(ctx context.Context, sid, cwd string) (int64, project.Info, error) {
 	sess, err := s.st.GetSession(ctx, sid)
 	if err != nil && !errors.Is(err, sql.ErrNoRows) {
@@ -410,6 +414,23 @@ func (s *Server) projectForSession(ctx context.Context, sid, cwd string) (int64,
 		p, err := s.st.ProjectByID(ctx, sess.ProjectID)
 		if err != nil {
 			return 0, project.Info{}, err
+		}
+		if strings.HasPrefix(p.Key, "legacy:") {
+			pid, info, err := s.projectFor(ctx, cwd)
+			if err != nil {
+				return 0, project.Info{}, err
+			}
+			if pid != p.ID {
+				// Adoption deleted the legacy project and moved the session along with
+				// its memories. When it did not (name mismatch or rival projects), the
+				// session keeps the legacy project so it stays with its memories.
+				if _, err := s.st.ProjectByID(ctx, p.ID); errors.Is(err, sql.ErrNoRows) {
+					return pid, info, nil
+				} else if err != nil {
+					return 0, project.Info{}, err
+				}
+			}
+			return p.ID, project.Info{Key: p.Key, Name: p.Name, Root: p.Root}, nil
 		}
 		return p.ID, project.Info{Key: p.Key, Name: p.Name, Root: p.Root}, nil
 	}
