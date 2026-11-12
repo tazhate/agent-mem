@@ -56,6 +56,7 @@ type Server struct {
 	mu       sync.Mutex
 	projects map[string]int64 // project key -> id
 	adopted  map[int64]bool
+	adopting map[int64]bool // single-flight: an adoption for this project is already running
 
 	// drainMu serializes spool drains (startup, ticker, before live events).
 	drainMu    sync.Mutex
@@ -73,6 +74,7 @@ func New(cfg *config.Config, st *store.Store, log *slog.Logger) *Server {
 		log:      log,
 		projects: map[string]int64{},
 		adopted:  map[int64]bool{},
+		adopting: map[int64]bool{},
 	}
 }
 
@@ -372,29 +374,45 @@ func (s *Server) projectFor(ctx context.Context, cwd string) (int64, project.Inf
 	s.mu.Lock()
 	id, ok := s.projects[info.Key]
 	s.mu.Unlock()
-	if ok {
+	if !ok {
+		var err error
+		if id, err = s.st.EnsureProject(ctx, info.Key, info.Name, info.Root); err != nil {
+			return 0, info, err
+		}
+		s.mu.Lock()
+		s.projects[info.Key] = id
+		s.mu.Unlock()
+	}
+	// An adoption that failed earlier (rival project, store error) is retried on the next
+	// event; concurrent events of one project must not stampede AdoptLegacy.
+	s.mu.Lock()
+	run := !s.adopted[id]
+	if run && s.adopting[id] {
+		s.mu.Unlock()
+		return id, info, nil // another goroutine is adopting this project right now
+	}
+	if run {
+		s.adopting[id] = true
+	}
+	s.mu.Unlock()
+	if !run {
 		return id, info, nil
 	}
-	id, err := s.st.EnsureProject(ctx, info.Key, info.Name, info.Root)
-	if err != nil {
-		return 0, info, err
+	defer func() {
+		s.mu.Lock()
+		delete(s.adopting, id)
+		s.mu.Unlock()
+	}()
+	merged, err := s.st.AdoptLegacy(ctx, id, info.Name)
+	if err == nil && merged {
+		s.mu.Lock()
+		s.adopted[id] = true // only a real merge counts; a declined one (rival project) is retried
+		s.mu.Unlock()
 	}
-	s.mu.Lock()
-	s.projects[info.Key] = id
-	first := !s.adopted[id]
-	s.mu.Unlock()
-	if first {
-		merged, err := s.st.AdoptLegacy(ctx, id, info.Name)
-		if err == nil {
-			s.mu.Lock()
-			s.adopted[id] = true // only after success, so a failed merge is retried
-			s.mu.Unlock()
-		}
-		if merged {
-			s.log.Info("adopted imported project", "name", info.Name, "key", info.Key)
-			for _, w := range s.workers {
-				w.Kick("", event.Reindex) // vector index caches project ids
-			}
+	if merged {
+		s.log.Info("adopted imported project", "name", info.Name, "key", info.Key)
+		for _, w := range s.workers {
+			w.Kick("", event.Reindex) // vector index caches project ids
 		}
 	}
 	return id, info, nil
@@ -412,6 +430,15 @@ func (s *Server) projectForSession(ctx context.Context, sid, cwd string) (int64,
 	}
 	if err == nil && sess.ProjectID != 0 {
 		p, err := s.st.ProjectByID(ctx, sess.ProjectID)
+		if errors.Is(err, sql.ErrNoRows) {
+			// A concurrent event of the same session adopted the legacy project away under
+			// us: the session row already points at the live project, so reread it once.
+			sess, err = s.st.GetSession(ctx, sid)
+			if err != nil {
+				return 0, project.Info{}, err
+			}
+			p, err = s.st.ProjectByID(ctx, sess.ProjectID)
+		}
 		if err != nil {
 			return 0, project.Info{}, err
 		}

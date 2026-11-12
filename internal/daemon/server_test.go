@@ -10,6 +10,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -245,6 +246,106 @@ func TestIngestLegacySessionAdoptedIntoLiveProject(t *testing.T) {
 	s.st.DB().QueryRow(`SELECT count(*) FROM projects WHERE key = 'legacy:repo'`).Scan(&legacyRows)
 	if legacyRows != 0 {
 		t.Fatalf("legacy project survived adoption")
+	}
+}
+
+func TestIngestRetriesFailedAdoption(t *testing.T) {
+	s, repo := newServer(t, "on")
+	ctx := t.Context()
+	legacyID, err := s.st.EnsureProject(ctx, "legacy:repo", "repo", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := s.st.InsertMemory(ctx, &store.Memory{ProjectID: legacyID, Type: "discovery", Title: "imported fact"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.st.Write(ctx, func(tx *sql.Tx) error {
+		_, _, _, err := s.st.TouchSession(ctx, tx, "claude-code:abc", "claude-code", "abc", legacyID, "", "", false, 1)
+		return err
+	}); err != nil {
+		t.Fatal(err)
+	}
+	// A rival repo with the same directory name blocks the first adoption attempt.
+	rivalID, err := s.st.EnsureProject(ctx, t.TempDir(), "repo", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = rivalID
+	ev := &event.Event{Runtime: "claude-code", NativeSession: "abc", Cwd: repo, Kind: event.SessionStart, ID: event.NewID(), TS: 1}
+	if _, _, _, err := s.ingest(ctx, ev, false); err != nil {
+		t.Fatal(err)
+	}
+	sess, err := s.st.GetSession(ctx, "claude-code:abc")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if sess.ProjectID != legacyID {
+		t.Fatalf("rival project did not block adoption: session on %d, want legacy %d", sess.ProjectID, legacyID)
+	}
+	// The rival goes away; the next event must retry the adoption instead of trusting the cache.
+	if _, err := s.st.DB().ExecContext(ctx, `DELETE FROM projects WHERE id = ?`, rivalID); err != nil {
+		t.Fatal(err)
+	}
+	next := &event.Event{Runtime: "claude-code", NativeSession: "abc", Cwd: repo, Kind: event.ToolPost, ID: event.NewID(), TS: 2}
+	if _, _, _, err := s.ingest(ctx, next, false); err != nil {
+		t.Fatal(err)
+	}
+	key := s.proj.Resolve(repo).Key
+	sess, err = s.st.GetSession(ctx, "claude-code:abc")
+	if err != nil {
+		t.Fatal(err)
+	}
+	p, err := s.st.ProjectByID(ctx, sess.ProjectID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if p.Key != key {
+		t.Fatalf("failed adoption was never retried: session on %q, want %q", p.Key, key)
+	}
+}
+
+func TestIngestConcurrentLegacyAdoption(t *testing.T) {
+	s, repo := newServer(t, "on")
+	ctx := t.Context()
+	legacyID, err := s.st.EnsureProject(ctx, "legacy:repo", "repo", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := s.st.InsertMemory(ctx, &store.Memory{ProjectID: legacyID, Type: "discovery", Title: "imported fact"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.st.Write(ctx, func(tx *sql.Tx) error {
+		_, _, _, err := s.st.TouchSession(ctx, tx, "claude-code:abc", "claude-code", "abc", legacyID, "", "", false, 1)
+		return err
+	}); err != nil {
+		t.Fatal(err)
+	}
+	// Several events of the same session race: each reads the legacy-pinned session, and the
+	// first successful adoption deletes the legacy project under the others.
+	var wg sync.WaitGroup
+	errs := make(chan error, 8)
+	for i := range 8 {
+		wg.Go(func() {
+			ev := &event.Event{Runtime: "claude-code", NativeSession: "abc", Cwd: repo, Kind: event.ToolPost, ID: event.NewID(), TS: int64(i + 2),
+				Tool: &event.Tool{Name: "Bash", Input: json.RawMessage(`{"command":"pwd"}`)}}
+			if _, _, _, err := s.ingest(ctx, ev, false); err != nil {
+				errs <- err
+			}
+		})
+	}
+	wg.Wait()
+	close(errs)
+	for err := range errs {
+		t.Fatalf("concurrent ingest of a legacy session failed: %v", err)
+	}
+	key := s.proj.Resolve(repo).Key
+	sess, err := s.st.GetSession(ctx, "claude-code:abc")
+	if err != nil {
+		t.Fatal(err)
+	}
+	p, err := s.st.ProjectByID(ctx, sess.ProjectID)
+	if err != nil || p.Key != key {
+		t.Fatalf("session project = %q (%v), want live %q", p.Key, err, key)
 	}
 }
 
