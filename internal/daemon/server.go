@@ -434,10 +434,15 @@ func (s *Server) projectForSession(ctx context.Context, sid, cwd string) (int64,
 			// A concurrent event of the same session adopted the legacy project away under
 			// us: the session row already points at the live project, so reread it once.
 			sess, err = s.st.GetSession(ctx, sid)
-			if err != nil {
-				return 0, project.Info{}, err
+			if err == nil {
+				p, err = s.st.ProjectByID(ctx, sess.ProjectID)
 			}
-			p, err = s.st.ProjectByID(ctx, sess.ProjectID)
+			if errors.Is(err, sql.ErrNoRows) {
+				// The pinned project is gone for good (an import over a running daemon raced
+				// its own adoption): fall back to the live cwd instead of failing every
+				// future event of this session.
+				return s.projectFor(ctx, cwd)
+			}
 		}
 		if err != nil {
 			return 0, project.Info{}, err
