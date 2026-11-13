@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io/fs"
+	"math"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -231,7 +232,7 @@ func (c *Config) validate() {
 		warn("recall.vector_floor %v outside [0, 0.95); using %v", f, d.Recall.VectorFloor)
 		c.Recall.VectorFloor = d.Recall.VectorFloor
 	}
-	if w := c.Recall.ImportedWeight; w < 0 || w > 1 {
+	if w := c.Recall.ImportedWeight; math.IsNaN(w) || w < 0 || w > 1 {
 		warn("recall.imported_weight %v outside [0, 1]; using %v", w, d.Recall.ImportedWeight)
 		c.Recall.ImportedWeight = d.Recall.ImportedWeight
 	}

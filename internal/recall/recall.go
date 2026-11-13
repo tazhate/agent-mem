@@ -265,7 +265,9 @@ func pick(hits []Scored, seen map[int64]bool, minScore float64, limit int) []Sco
 		if len(out) >= limit {
 			break
 		}
-		if seen[h.Mem.ID] || h.Score < minScore {
+		// A zero score means the memory was scaled out entirely (recall.imported_weight = 0);
+		// min_score may legitimately be 0 too, so filter it explicitly.
+		if seen[h.Mem.ID] || h.Score <= 0 || h.Score < minScore {
 			continue
 		}
 		out = append(out, h)
@@ -312,12 +314,20 @@ func (e *Engine) sessionStart(ctx context.Context, req Request, seen map[int64]b
 	if err != nil {
 		return Result{}, err
 	}
-	recent, err := e.st.Recent(ctx, store.Scope{ProjectID: req.ProjectID, Fatigue: e.cfg.FatigueAfter}, 10)
+	// Below weight 1 imported memories may be demoted away entirely, so overfetch recent
+	// candidates: the native tail beyond the regular limit has to be able to fill the slots.
+	recentLimit := 10
+	if e.cfg.ImportedWeight < 1 {
+		recentLimit *= 3
+	}
+	recent, err := e.st.Recent(ctx, store.Scope{ProjectID: req.ProjectID, Fatigue: e.cfg.FatigueAfter}, recentLimit)
 	if err != nil {
 		return Result{}, err
 	}
 	header := false
-	for _, m := range append(e.demoteImported(durable), e.demoteImported(recent)...) {
+	// Demote after the merge: demoting each list separately would keep imported durable
+	// memories ahead of native recent ones.
+	for _, m := range e.demoteImported(append(durable, recent...)) {
 		if seen[m.ID] || slices.ContainsFunc(items, func(i store.Injection) bool { return i.MemoryID == m.ID }) {
 			continue
 		}

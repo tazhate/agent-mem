@@ -1,6 +1,8 @@
 package recall
 
 import (
+	"fmt"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -149,5 +151,114 @@ func TestImportedWeight(t *testing.T) {
 	hits, _ := New(st, cfg, nil).Search(ctx, prompt.Prompt, store.Scope{ProjectID: pid}, 5)
 	if len(hits) == 0 || hits[0].Mem.ID != old {
 		t.Fatalf("explicit search must rank the imported memory as usual, got %v", hits)
+	}
+}
+
+func TestImportedWeightZeroWithZeroMinScore(t *testing.T) {
+	ctx := t.Context()
+	st, err := store.Open(filepath.Join(t.TempDir(), "r.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	pid, _ := st.EnsureProject(ctx, "k", "p", "")
+	old, _, _ := st.InsertMemory(ctx, &store.Memory{ProjectID: pid, Type: "gotcha", Origin: "claude-mem", OriginID: "1",
+		Title: "vault sealed: scripts read stale keys after restart"})
+	st.DB().Exec(`UPDATE memories SET use_count = 1 WHERE id = ?`, old)
+	// min_score = 0 is a legal configuration; weight 0 must still keep the memory out.
+	cfg := config.Default().Recall
+	cfg.ImportedWeight = 0
+	cfg.MinScore = 0
+	res, err := New(st, cfg, nil).Recall(ctx, Request{
+		Event: &event.Event{Kind: event.Prompt, Prompt: "vault sealed and the scripts read keys"}, SessionID: "s", ProjectID: pid, ProjectName: "p"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, it := range res.Items {
+		if it.MemoryID == old {
+			t.Fatalf("weight 0 with min_score 0: imported memory injected")
+		}
+	}
+}
+
+func TestImportedWeightNaNFallsBackToDefault(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.toml")
+	if err := os.WriteFile(path, []byte("[recall]\nimported_weight = nan\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("AMEM_CONFIG", path)
+	c, err := config.Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if w := c.Recall.ImportedWeight; w != 1 {
+		t.Fatalf("nan imported_weight must fall back to 1, got %v", w)
+	}
+	if len(c.Warnings) == 0 {
+		t.Fatal("nan imported_weight must warn")
+	}
+}
+
+func TestImportedWeightSessionStartOrder(t *testing.T) {
+	ctx := t.Context()
+	st, err := store.Open(filepath.Join(t.TempDir(), "r.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	pid, _ := st.EnsureProject(ctx, "k", "p", "")
+	// An imported durable memory must not outrank a native recent one: demote happens
+	// on the merged list, not per list.
+	imp, _, _ := st.InsertMemory(ctx, &store.Memory{ProjectID: pid, Type: "gotcha", Origin: "claude-mem", OriginID: "1",
+		Title: "imported gotcha about the vault"})
+	st.DB().Exec(`UPDATE memories SET use_count = 1 WHERE id = ?`, imp)
+	native, _, _ := st.InsertMemory(ctx, &store.Memory{ProjectID: pid, Type: "discovery",
+		Title: "native discovery after the import"})
+	cfg := config.Default().Recall
+	cfg.ImportedWeight = 0.3
+	res, err := New(st, cfg, nil).Recall(ctx, Request{
+		Event: &event.Event{Kind: event.SessionStart}, SessionID: "s", ProjectID: pid, ProjectName: "p"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(res.Items) < 2 || res.Items[0].MemoryID != native || res.Items[1].MemoryID != imp {
+		var ids []int64
+		for _, it := range res.Items {
+			ids = append(ids, it.MemoryID)
+		}
+		t.Fatalf("native recent memory must lead imported durable one, got %v", ids)
+	}
+}
+
+func TestImportedWeightZeroBackfillsFromNativeTail(t *testing.T) {
+	ctx := t.Context()
+	st, err := store.Open(filepath.Join(t.TempDir(), "r.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	pid, _ := st.EnsureProject(ctx, "k", "p", "")
+	// Ten imported memories fill the regular recent limit; at weight 0 the native tail
+	// beyond it must still be reachable at session start.
+	for i := range 10 {
+		id, _, _ := st.InsertMemory(ctx, &store.Memory{ProjectID: pid, Type: "gotcha", Origin: "claude-mem",
+			OriginID: fmt.Sprint(i), Title: "imported gotcha number " + fmt.Sprint(i)})
+		st.DB().Exec(`UPDATE memories SET created_at = ? WHERE id = ?`, int64(1000+i), id)
+	}
+	native, _, _ := st.InsertMemory(ctx, &store.Memory{ProjectID: pid, Type: "discovery", Title: "native memory under the imported block"})
+	st.DB().Exec(`UPDATE memories SET created_at = ? WHERE id = ?`, int64(999), native)
+	cfg := config.Default().Recall
+	cfg.ImportedWeight = 0
+	res, err := New(st, cfg, nil).Recall(ctx, Request{
+		Event: &event.Event{Kind: event.SessionStart}, SessionID: "s", ProjectID: pid, ProjectName: "p"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	found := false
+	for _, it := range res.Items {
+		found = found || it.MemoryID == native
+	}
+	if !found {
+		t.Fatalf("native memory under the imported block is unreachable at weight 0: %d items", len(res.Items))
 	}
 }
