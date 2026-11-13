@@ -67,7 +67,7 @@ Track multi-step work with work_state.`
 func New(call Caller, cwd string) *mcp.Server {
 	s := mcp.NewServer(&mcp.Implementation{Name: "amem", Version: daemon.Version}, &mcp.ServerOptions{Instructions: instructions})
 
-	mcp.AddTool(s, &mcp.Tool{Name: "memory_search", Description: "Search memory of past sessions. Returns an index: id, date, type, title, token cost. Fetch details with memory_get."},
+	mcp.AddTool(s, &mcp.Tool{Name: "memory_search", Description: "Search memory of past sessions. Returns an index: id, date, type, title, token cost. Fetch details with memory_get.", Annotations: &mcp.ToolAnnotations{ReadOnlyHint: true}},
 		func(ctx context.Context, req *mcp.CallToolRequest, in SearchIn) (*mcp.CallToolResult, any, error) {
 			p := daemon.SearchParams{Query: in.Query, Types: in.Types, Limit: in.Limit}
 			switch in.Project {
@@ -91,7 +91,7 @@ func New(call Caller, cwd string) *mcp.Server {
 			return text(b.String()), nil, nil
 		})
 
-	mcp.AddTool(s, &mcp.Tool{Name: "memory_get", Description: "Fetch full memory records by id."},
+	mcp.AddTool(s, &mcp.Tool{Name: "memory_get", Description: "Fetch full memory records by id.", Annotations: &mcp.ToolAnnotations{ReadOnlyHint: true}},
 		func(ctx context.Context, req *mcp.CallToolRequest, in GetIn) (*mcp.CallToolResult, any, error) {
 			var mems []*store.Memory
 			if err := call(daemon.OpGet, daemon.GetParams{IDs: in.IDs}, &mems); err != nil {
@@ -100,7 +100,7 @@ func New(call Caller, cwd string) *mcp.Server {
 			return text(FormatMemories(mems)), nil, nil
 		})
 
-	mcp.AddTool(s, &mcp.Tool{Name: "memory_timeline", Description: "Show what happened around a memory in the same project, in time order."},
+	mcp.AddTool(s, &mcp.Tool{Name: "memory_timeline", Description: "Show what happened around a memory in the same project, in time order.", Annotations: &mcp.ToolAnnotations{ReadOnlyHint: true}},
 		func(ctx context.Context, req *mcp.CallToolRequest, in TimelineIn) (*mcp.CallToolResult, any, error) {
 			var mems []*store.Memory
 			if err := call(daemon.OpTimeline, daemon.TimelineParams{Anchor: in.ID, Before: in.Before, After: in.After}, &mems); err != nil {

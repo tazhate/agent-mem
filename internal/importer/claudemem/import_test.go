@@ -94,12 +94,27 @@ func makeSource(t *testing.T, schema string) string {
 }
 
 func legacySourceSchema() string {
+	// Old claude-mem builds did not track merges: merged_into_project appears in neither
+	// observations nor session_summaries, and the late columns of observations are absent too.
 	r := strings.NewReplacer(
 		"project TEXT, cwd TEXT, observed_model TEXT, started_at_epoch INTEGER", "project TEXT, started_at_epoch INTEGER",
 		"INSERT INTO sdk_sessions VALUES (1, 'c1', 'm1', 'claude', 'proj/wt-x', NULL, NULL, 1000, 2000);",
 		"INSERT INTO sdk_sessions VALUES (1, 'c1', 'm1', 'claude', 'proj/wt-x', 1000, 2000);",
 		"CREATE TABLE work_state_entries (id INTEGER PRIMARY KEY, project TEXT, list_name TEXT, fields TEXT, created_at_epoch INTEGER);\n", "",
 		"INSERT INTO work_state_entries VALUES (1, 'proj', 'todo', '{\"task\":\"x\",\"status\":\"todo\"}', 1300);\n", "",
+		"CREATE TABLE observations (id INTEGER PRIMARY KEY, memory_session_id TEXT, project TEXT, merged_into_project TEXT, type TEXT,",
+		"CREATE TABLE observations (id INTEGER PRIMARY KEY, memory_session_id TEXT, project TEXT, type TEXT,",
+		"created_at_epoch INTEGER, generated_by_model TEXT, agent_type TEXT);", "created_at_epoch INTEGER);",
+		"INSERT INTO observations VALUES (1, 'm1', 'proj/wt-x', NULL, 'bugfix', 'leaked GHPPREFIXabcdefghijklmnopqrstuvwxyz0123456789',",
+		"INSERT INTO observations VALUES (1, 'm1', 'proj/wt-x', 'bugfix', 'leaked GHPPREFIXabcdefghijklmnopqrstuvwxyz0123456789',",
+		"'narrative <private>hidden</private> visible', '[]', '[]', '[]', 1500, 'm', NULL);",
+		"'narrative <private>hidden</private> visible', '[]', '[]', '[]', 1500);",
+		"INSERT INTO observations VALUES (2, 'gone', 'proj', NULL, 'oddity', 'orphan memory', '', '[]', 'body', '[]', '[\"/a.go\"]', '[]', 1600, NULL, NULL);",
+		"INSERT INTO observations VALUES (2, 'gone', 'proj', 'oddity', 'orphan memory', '', '[]', 'body', '[]', '[\"/a.go\"]', '[]', 1600);",
+		"INSERT INTO session_summaries VALUES (1, 'm1', 'proj', NULL, 'req with ANTPREFIXapi03-abcdefghijklmnopqrstuvwxyz', '', '', '', '', '', 1700);",
+		"INSERT INTO session_summaries VALUES (1, 'm1', 'proj', 'req with ANTPREFIXapi03-abcdefghijklmnopqrstuvwxyz', '', '', '', '', '', 1700);",
+		"CREATE TABLE session_summaries (id INTEGER PRIMARY KEY, memory_session_id TEXT, project TEXT, merged_into_project TEXT,",
+		"CREATE TABLE session_summaries (id INTEGER PRIMARY KEY, memory_session_id TEXT, project TEXT,",
 	)
 	return r.Replace(srcSchema)
 }

@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -39,6 +40,43 @@ func TestAnthropicFallback(t *testing.T) {
 	p, _ := New(t.Context(), config.ProviderConfig{Kind: "anthropic", BaseURL: srv.URL, Key: "k"})
 	out, err := p.Complete(t.Context(), Request{System: "s", User: "u", Schema: schema})
 	if err != nil || string(out) != `{"ok":true}` || calls.Load() != 2 {
+		t.Fatalf("out=%s err=%v calls=%d", out, err, calls.Load())
+	}
+}
+
+func TestAnthropicGatewayIgnoresOutputConfig(t *testing.T) {
+	var calls atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls.Add(1)
+		var req struct {
+			System any `json:"system"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			w.WriteHeader(400)
+			return
+		}
+		// A gateway (z.ai with GLM) accepts output_config with a 200 and silently ignores it:
+		// the schema must reach the model through the system prompt in that first request.
+		var system string
+		switch s := req.System.(type) {
+		case string:
+			system = s
+		case []any:
+			for _, part := range s {
+				if m, _ := part.(map[string]any); m != nil {
+					system += fmt.Sprint(m["text"])
+				}
+			}
+		}
+		if !strings.Contains(system, `"ok"`) {
+			t.Errorf("first request carried no prompt-side schema: %q", system)
+		}
+		w.Write([]byte(`{"content":[{"type":"text","text":"Here:\n` + "```json\\n{\\\"ok\\\":true}\\n```" + `"}]}`))
+	}))
+	defer srv.Close()
+	p, _ := New(t.Context(), config.ProviderConfig{Kind: "anthropic", BaseURL: srv.URL, Key: "k"})
+	out, err := p.Complete(t.Context(), Request{System: "s", User: "u", Schema: schema})
+	if err != nil || string(out) != `{"ok":true}` || calls.Load() != 1 {
 		t.Fatalf("out=%s err=%v calls=%d", out, err, calls.Load())
 	}
 }
