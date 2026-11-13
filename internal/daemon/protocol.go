@@ -30,7 +30,7 @@ func buildTime() string {
 }
 
 // release is the release date, YYYY.MM.DD (a second release on the same day adds .1, .2...).
-const release = "2026.11.13"
+const release = "2026.11.14"
 
 func buildVersion() string {
 	info, ok := debug.ReadBuildInfo()

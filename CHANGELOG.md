@@ -4,13 +4,20 @@ All notable changes to amem. A version is the release date, `YYYY.MM.DD`, tagged
 `vYYYY.MM.DD`; a second release on the same day adds `.1`, `.2`. Any release may change
 config keys or the database schema; migrations run when the database is opened.
 
-## [Unreleased]
+## [2026.11.14] - 2026-11-14
 
 ### Added
 
 - `recall.imported_weight` scales the score of memories brought in by `amem import` during
   automatic injection (1 = like native memories, 0 = never injected). Explicit search is not
   affected. The default is 1.
+
+### Fixed
+
+- `imported_weight = 0` with `min_score = 0` no longer lets an imported memory into
+  prompt and subagent injection, `nan` falls back to the default with a warning, and at
+  session start imported durable memories no longer outrank native recent ones while the
+  native tail stays reachable (edge cases from a two-model review).
 
 ## [2026.11.13] - 2026-11-13
 
@@ -87,6 +94,7 @@ First release.
   `<private>` blocks before anything is stored; private prompts keep their whole turn out
   of the database.
 
+[2026.11.14]: https://github.com/tazhate/agent-mem/releases/tag/v2026.11.14
 [2026.11.13]: https://github.com/tazhate/agent-mem/releases/tag/v2026.11.13
 [2026.11.11]: https://github.com/tazhate/agent-mem/releases/tag/v2026.11.11
 [2026.11.09]: https://github.com/tazhate/agent-mem/releases/tag/v2026.11.09
