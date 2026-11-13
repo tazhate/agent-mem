@@ -315,6 +315,11 @@ type Hit struct {
 	BM25 float64
 }
 
+// Imported reports whether the memory came from another system through amem import.
+func (m *Memory) Imported() bool {
+	return m.Origin == "claude-mem"
+}
+
 // Scope limits a search: one project plus globals, or everything when ProjectID is 0 and All is set.
 type Scope struct {
 	ProjectID int64
@@ -325,6 +330,9 @@ type Scope struct {
 	// Fatigue drops memories shown at least this many times without ever being used
 	// (automatic recall only; 0 = off). Decisions and preferences are exempt.
 	Fatigue int
+	// Auto marks automatic recall, where recall.imported_weight applies; explicit search
+	// leaves it unset.
+	Auto bool
 }
 
 func (sc Scope) where(args *[]any) string {

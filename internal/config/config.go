@@ -76,6 +76,10 @@ type RecallConfig struct {
 	// FatigueAfter stops automatic injection of a memory shown this many times without ever
 	// being used; explicit search still finds it. 0 disables.
 	FatigueAfter int `toml:"fatigue_after"`
+	// ImportedWeight scales the score of memories imported from another system (amem import)
+	// during automatic injection: 1 treats them like native ones, 0 never injects them.
+	// Explicit search is not affected.
+	ImportedWeight float64 `toml:"imported_weight"`
 	// StartSummary shows the user a short summary of the project's memory at session start
 	// (runtimes with a user-visible hook message: Claude Code, Codex, Gemini CLI).
 	StartSummary bool `toml:"start_summary"`
@@ -150,6 +154,7 @@ func Default() *Config {
 			GlobalPreferences:   true,
 			VectorFloor:         0.40,
 			FatigueAfter:        10,
+			ImportedWeight:      1,
 			StartSummary:        true,
 			StartSummaryItems:   5,
 			StartSummaryColor:   true,
@@ -225,6 +230,10 @@ func (c *Config) validate() {
 	if f := c.Recall.VectorFloor; f < 0 || f >= 0.95 {
 		warn("recall.vector_floor %v outside [0, 0.95); using %v", f, d.Recall.VectorFloor)
 		c.Recall.VectorFloor = d.Recall.VectorFloor
+	}
+	if w := c.Recall.ImportedWeight; w < 0 || w > 1 {
+		warn("recall.imported_weight %v outside [0, 1]; using %v", w, d.Recall.ImportedWeight)
+		c.Recall.ImportedWeight = d.Recall.ImportedWeight
 	}
 	if c.Embed.MaxChars <= 0 {
 		if c.Embed.MaxChars < 0 {

@@ -4,6 +4,14 @@ All notable changes to amem. A version is the release date, `YYYY.MM.DD`, tagged
 `vYYYY.MM.DD`; a second release on the same day adds `.1`, `.2`. Any release may change
 config keys or the database schema; migrations run when the database is opened.
 
+## [Unreleased]
+
+### Added
+
+- `recall.imported_weight` scales the score of memories brought in by `amem import` during
+  automatic injection (1 = like native memories, 0 = never injected). Explicit search is not
+  affected. The default is 1.
+
 ## [2026.11.11] - 2026-11-11
 
 ### Fixed
