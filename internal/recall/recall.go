@@ -78,7 +78,7 @@ func (e *Engine) Recall(ctx context.Context, req Request) (Result, error) {
 		strict = 1.5
 	}
 	// Automatic injection skips memories that were shown again and again without being used.
-	scope := store.Scope{ProjectID: req.ProjectID, Fatigue: e.cfg.FatigueAfter}
+	scope := store.Scope{ProjectID: req.ProjectID, Fatigue: e.cfg.FatigueAfter, Auto: true}
 	switch ev.Kind {
 	case event.SessionStart:
 		if ev.Source == "compact" {
@@ -118,9 +118,9 @@ func (e *Engine) Recall(ctx context.Context, req Request) (Result, error) {
 			if seen[m.ID] {
 				continue
 			}
-			sc := Scored{Mem: m, Rel: 1, Score: typeWeight(m.Type) * recency(m) * usage(m)}
+			sc := Scored{Mem: m, Rel: 1, Score: typeWeight(m.Type) * recency(m) * usage(m) * e.originWeight(m, scope)}
 			// Past the session budget only strong file matches get through.
-			if strict > 1 && sc.Score < e.cfg.MinScore*strict {
+			if sc.Score == 0 || (strict > 1 && sc.Score < e.cfg.MinScore*strict) {
 				continue
 			}
 			picked = append(picked, sc)
@@ -253,7 +253,7 @@ func (e *Engine) Search(ctx context.Context, text string, scope store.Scope, lim
 			floor := e.cfg.VectorFloor // validated to [0, 0.95)
 			rel = max(rel, clamp01((float64(sim)-floor)/(1-floor)*1.5))
 		}
-		out = append(out, Scored{Mem: m, Rel: rel, Score: rel * typeWeight(m.Type) * recency(m) * usage(m)})
+		out = append(out, Scored{Mem: m, Rel: rel, Score: rel * typeWeight(m.Type) * recency(m) * usage(m) * e.originWeight(m, scope)})
 	}
 	slices.SortFunc(out, func(a, b Scored) int { return cmp.Compare(b.Score, a.Score) })
 	return out[:min(len(out), limit)], nil
@@ -265,7 +265,9 @@ func pick(hits []Scored, seen map[int64]bool, minScore float64, limit int) []Sco
 		if len(out) >= limit {
 			break
 		}
-		if seen[h.Mem.ID] || h.Score < minScore {
+		// A zero score means the memory was scaled out entirely (recall.imported_weight = 0);
+		// min_score may legitimately be 0 too, so filter it explicitly.
+		if seen[h.Mem.ID] || h.Score <= 0 || h.Score < minScore {
 			continue
 		}
 		out = append(out, h)
@@ -312,12 +314,20 @@ func (e *Engine) sessionStart(ctx context.Context, req Request, seen map[int64]b
 	if err != nil {
 		return Result{}, err
 	}
-	recent, err := e.st.Recent(ctx, store.Scope{ProjectID: req.ProjectID, Fatigue: e.cfg.FatigueAfter}, 10)
+	// Below weight 1 imported memories may be demoted away entirely, so overfetch recent
+	// candidates: the native tail beyond the regular limit has to be able to fill the slots.
+	recentLimit := 10
+	if e.cfg.ImportedWeight < 1 {
+		recentLimit *= 3
+	}
+	recent, err := e.st.Recent(ctx, store.Scope{ProjectID: req.ProjectID, Fatigue: e.cfg.FatigueAfter}, recentLimit)
 	if err != nil {
 		return Result{}, err
 	}
 	header := false
-	for _, m := range append(durable, recent...) {
+	// Demote after the merge: demoting each list separately would keep imported durable
+	// memories ahead of native recent ones.
+	for _, m := range e.demoteImported(append(durable, recent...)) {
 		if seen[m.ID] || slices.ContainsFunc(items, func(i store.Injection) bool { return i.MemoryID == m.ID }) {
 			continue
 		}
@@ -447,6 +457,36 @@ func recency(m *store.Memory) float64 {
 	}
 	days := float64(time.Now().UnixMilli()-m.CreatedAt) / 86_400_000
 	return 0.5 + 0.5*math.Exp(-days*math.Ln2/30)
+}
+
+// originWeight scales down imported memories during automatic recall (recall.imported_weight);
+// explicit search ranks them like any other memory.
+func (e *Engine) originWeight(m *store.Memory, scope store.Scope) float64 {
+	if scope.Auto && m.Imported() {
+		return e.cfg.ImportedWeight
+	}
+	return 1
+}
+
+// demoteImported applies recall.imported_weight to a list that has no score: below 1 imported
+// memories move behind the others, at 0 they are left out.
+func (e *Engine) demoteImported(mems []*store.Memory) []*store.Memory {
+	if e.cfg.ImportedWeight >= 1 {
+		return mems
+	}
+	out := make([]*store.Memory, 0, len(mems))
+	var imported []*store.Memory
+	for _, m := range mems {
+		if m.Imported() {
+			imported = append(imported, m)
+		} else {
+			out = append(out, m)
+		}
+	}
+	if e.cfg.ImportedWeight > 0 {
+		out = append(out, imported...)
+	}
+	return out
 }
 
 // usage rewards memories that proved useful and penalizes ones shown often but never used.
