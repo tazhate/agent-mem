@@ -431,12 +431,15 @@ type obsRow struct {
 }
 
 func (im *importer) observations(ctx context.Context) error {
+	if !im.hasTable("observations") {
+		return nil
+	}
 	var last int64
 	for {
-		rows, err := im.src.QueryContext(ctx, `SELECT id, coalesce(memory_session_id,''), coalesce(project,''), coalesce(merged_into_project,''),
+		rows, err := im.src.QueryContext(ctx, `SELECT id, coalesce(memory_session_id,''), coalesce(project,''), `+im.textColumn("observations", "merged_into_project")+`,
 			coalesce(type,''), coalesce(title,''), coalesce(subtitle,''), coalesce(facts,'[]'), coalesce(narrative,''),
 			coalesce(concepts,'[]'), coalesce(files_read,'[]'), coalesce(files_modified,'[]'), created_at_epoch,
-			coalesce(generated_by_model,''), coalesce(agent_type,'')
+			`+im.textColumn("observations", "generated_by_model")+`, `+im.textColumn("observations", "agent_type")+`
 			FROM observations WHERE id > ? ORDER BY id LIMIT 2000`, last)
 		if err != nil {
 			return err
@@ -545,7 +548,10 @@ func (im *importer) convert(ctx context.Context, tx *sql.Tx, r obsRow) error {
 }
 
 func (im *importer) summaries(ctx context.Context) error {
-	rows, err := im.src.QueryContext(ctx, `SELECT id, coalesce(memory_session_id,''), coalesce(project,''), coalesce(merged_into_project,''),
+	if !im.hasTable("session_summaries") {
+		return nil
+	}
+	rows, err := im.src.QueryContext(ctx, `SELECT id, coalesce(memory_session_id,''), coalesce(project,''), `+im.textColumn("session_summaries", "merged_into_project")+`,
 		coalesce(request,''), coalesce(investigated,''), coalesce(learned,''), coalesce(completed,''), coalesce(next_steps,''),
 		coalesce(notes,''), created_at_epoch FROM session_summaries ORDER BY id`)
 	if err != nil {
@@ -604,6 +610,9 @@ func (im *importer) summaries(ctx context.Context) error {
 }
 
 func (im *importer) prompts(ctx context.Context) error {
+	if !im.hasTable("user_prompts") {
+		return nil
+	}
 	rows, err := im.src.QueryContext(ctx, `SELECT id, content_session_id, prompt_number, prompt_text, created_at_epoch FROM user_prompts ORDER BY id`)
 	if err != nil {
 		return err
@@ -712,15 +721,20 @@ func (im *importer) raw(ctx context.Context) error {
 	since := max(im.opt.RawSince, 0)
 	// Tool uses of fully private turns are not imported at all.
 	private := map[string]bool{}
-	if rows, err := im.src.QueryContext(ctx, `SELECT content_session_id, prompt_number, prompt_text FROM user_prompts`); err == nil {
-		for rows.Next() {
-			var cs, text string
-			var n int
-			if rows.Scan(&cs, &n, &text) == nil && redact.IsFullyPrivate(text) {
-				private[fmt.Sprint(cs, "/", n)] = true
+	if im.hasTable("user_prompts") {
+		if rows, err := im.src.QueryContext(ctx, `SELECT content_session_id, prompt_number, prompt_text FROM user_prompts`); err == nil {
+			for rows.Next() {
+				var cs, text string
+				var n int
+				if rows.Scan(&cs, &n, &text) == nil && redact.IsFullyPrivate(text) {
+					private[fmt.Sprint(cs, "/", n)] = true
+				}
 			}
+			rows.Close()
 		}
-		rows.Close()
+	}
+	if !im.hasTable("tool_uses") {
+		return nil
 	}
 	var last int64
 	for {

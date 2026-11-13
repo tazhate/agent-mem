@@ -2,6 +2,7 @@ package daemon
 
 import (
 	"context"
+	"database/sql"
 	"encoding/json"
 	"io"
 	"log/slog"
@@ -9,6 +10,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -193,6 +195,196 @@ func TestIngestCwdChurnKeepsSessionProject(t *testing.T) {
 	}
 	if err := s.st.DB().QueryRow(`SELECT count(*) FROM projects`).Scan(&projects); err != nil || projects != 2 {
 		t.Fatalf("a distinct session did not get its plain-directory project: %d, %v", projects, err)
+	}
+}
+
+func TestIngestLegacySessionAdoptedIntoLiveProject(t *testing.T) {
+	s, repo := newServer(t, "on")
+	ctx := t.Context()
+	// Import created the legacy project and pinned the session to it: no cwd was recorded.
+	legacyID, err := s.st.EnsureProject(ctx, "legacy:repo", "repo", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	memoryID, _, err := s.st.InsertMemory(ctx, &store.Memory{ProjectID: legacyID, Type: "discovery", Title: "imported fact"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	// The import created the session row and pinned it to the legacy project: no cwd was recorded.
+	if err := s.st.Write(ctx, func(tx *sql.Tx) error {
+		_, _, _, err := s.st.TouchSession(ctx, tx, "claude-code:abc", "claude-code", "abc", legacyID, "", "", false, 1)
+		return err
+	}); err != nil {
+		t.Fatal(err)
+	}
+	ev := &event.Event{Runtime: "claude-code", NativeSession: "abc", Cwd: repo, Kind: event.SessionStart, ID: event.NewID(), TS: 1}
+	if _, _, _, err := s.ingest(ctx, ev, false); err != nil {
+		t.Fatal(err)
+	}
+	// Resolve without touching the store: a projectFor call here would itself adopt the
+	// legacy project and mask a daemon that failed to do it during ingest.
+	key := s.proj.Resolve(repo).Key
+	sess, err := s.st.GetSession(ctx, "claude-code:abc")
+	if err != nil {
+		t.Fatal(err)
+	}
+	p, err := s.st.ProjectByID(ctx, sess.ProjectID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if p.Key != key {
+		t.Fatalf("resumed imported session stayed on %q, want live project %q", p.Key, key)
+	}
+	var gotProject int64
+	if err := s.st.DB().QueryRow(`SELECT project_id FROM memories WHERE id = ?`, memoryID).Scan(&gotProject); err != nil {
+		t.Fatal(err)
+	}
+	if gotProject != sess.ProjectID {
+		t.Fatalf("imported memory project = %d, want %d", gotProject, sess.ProjectID)
+	}
+	var legacyRows int
+	s.st.DB().QueryRow(`SELECT count(*) FROM projects WHERE key = 'legacy:repo'`).Scan(&legacyRows)
+	if legacyRows != 0 {
+		t.Fatalf("legacy project survived adoption")
+	}
+}
+
+func TestIngestRetriesFailedAdoption(t *testing.T) {
+	s, repo := newServer(t, "on")
+	ctx := t.Context()
+	legacyID, err := s.st.EnsureProject(ctx, "legacy:repo", "repo", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := s.st.InsertMemory(ctx, &store.Memory{ProjectID: legacyID, Type: "discovery", Title: "imported fact"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.st.Write(ctx, func(tx *sql.Tx) error {
+		_, _, _, err := s.st.TouchSession(ctx, tx, "claude-code:abc", "claude-code", "abc", legacyID, "", "", false, 1)
+		return err
+	}); err != nil {
+		t.Fatal(err)
+	}
+	// A rival repo with the same directory name blocks the first adoption attempt.
+	rivalID, err := s.st.EnsureProject(ctx, t.TempDir(), "repo", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = rivalID
+	ev := &event.Event{Runtime: "claude-code", NativeSession: "abc", Cwd: repo, Kind: event.SessionStart, ID: event.NewID(), TS: 1}
+	if _, _, _, err := s.ingest(ctx, ev, false); err != nil {
+		t.Fatal(err)
+	}
+	sess, err := s.st.GetSession(ctx, "claude-code:abc")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if sess.ProjectID != legacyID {
+		t.Fatalf("rival project did not block adoption: session on %d, want legacy %d", sess.ProjectID, legacyID)
+	}
+	// The rival goes away; the next event must retry the adoption instead of trusting the cache.
+	if _, err := s.st.DB().ExecContext(ctx, `DELETE FROM projects WHERE id = ?`, rivalID); err != nil {
+		t.Fatal(err)
+	}
+	next := &event.Event{Runtime: "claude-code", NativeSession: "abc", Cwd: repo, Kind: event.ToolPost, ID: event.NewID(), TS: 2}
+	if _, _, _, err := s.ingest(ctx, next, false); err != nil {
+		t.Fatal(err)
+	}
+	key := s.proj.Resolve(repo).Key
+	sess, err = s.st.GetSession(ctx, "claude-code:abc")
+	if err != nil {
+		t.Fatal(err)
+	}
+	p, err := s.st.ProjectByID(ctx, sess.ProjectID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if p.Key != key {
+		t.Fatalf("failed adoption was never retried: session on %q, want %q", p.Key, key)
+	}
+}
+
+func TestIngestConcurrentLegacyAdoption(t *testing.T) {
+	s, repo := newServer(t, "on")
+	ctx := t.Context()
+	legacyID, err := s.st.EnsureProject(ctx, "legacy:repo", "repo", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := s.st.InsertMemory(ctx, &store.Memory{ProjectID: legacyID, Type: "discovery", Title: "imported fact"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.st.Write(ctx, func(tx *sql.Tx) error {
+		_, _, _, err := s.st.TouchSession(ctx, tx, "claude-code:abc", "claude-code", "abc", legacyID, "", "", false, 1)
+		return err
+	}); err != nil {
+		t.Fatal(err)
+	}
+	// Several events of the same session race: each reads the legacy-pinned session, and the
+	// first successful adoption deletes the legacy project under the others.
+	var wg sync.WaitGroup
+	errs := make(chan error, 8)
+	for i := range 8 {
+		wg.Go(func() {
+			ev := &event.Event{Runtime: "claude-code", NativeSession: "abc", Cwd: repo, Kind: event.ToolPost, ID: event.NewID(), TS: int64(i + 2),
+				Tool: &event.Tool{Name: "Bash", Input: json.RawMessage(`{"command":"pwd"}`)}}
+			if _, _, _, err := s.ingest(ctx, ev, false); err != nil {
+				errs <- err
+			}
+		})
+	}
+	wg.Wait()
+	close(errs)
+	for err := range errs {
+		t.Fatalf("concurrent ingest of a legacy session failed: %v", err)
+	}
+	key := s.proj.Resolve(repo).Key
+	sess, err := s.st.GetSession(ctx, "claude-code:abc")
+	if err != nil {
+		t.Fatal(err)
+	}
+	p, err := s.st.ProjectByID(ctx, sess.ProjectID)
+	if err != nil || p.Key != key {
+		t.Fatalf("session project = %q (%v), want live %q", p.Key, err, key)
+	}
+}
+
+func TestIngestSessionOnDeletedProjectFallsBackToCwd(t *testing.T) {
+	s, repo := newServer(t, "on")
+	ctx := t.Context()
+	// An import over the running daemon can leave a session pointing at a project that a
+	// concurrent adoption already deleted. Every later event must fall back to the live cwd
+	// instead of failing with sql.ErrNoRows forever.
+	gone, err := s.st.EnsureProject(ctx, "legacy:repo", "repo", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := s.st.Write(ctx, func(tx *sql.Tx) error {
+		_, _, _, err := s.st.TouchSession(ctx, tx, "claude-code:abc", "claude-code", "abc", gone, "", "", false, 1)
+		return err
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.st.DB().ExecContext(ctx, `DELETE FROM projects WHERE id = ?`, gone); err != nil {
+		t.Fatal(err)
+	}
+	ev := &event.Event{Runtime: "claude-code", NativeSession: "abc", Cwd: repo, Kind: event.ToolPost, ID: event.NewID(), TS: 2,
+		Tool: &event.Tool{Name: "Bash", Input: json.RawMessage(`{"command":"pwd"}`)}}
+	pid, _, _, err := s.ingest(ctx, ev, false)
+	_ = pid
+	if err != nil {
+		t.Fatalf("event of a session on a deleted project failed: %v", err)
+	}
+	key := s.proj.Resolve(repo).Key
+	sess, err := s.st.GetSession(ctx, "claude-code:abc")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := s.st.DB().QueryRow(`SELECT key FROM projects WHERE id = ?`, sess.ProjectID).Scan(&key); err != nil {
+		t.Fatal(err)
+	}
+	if want := s.proj.Resolve(repo).Key; key != want {
+		t.Fatalf("session project = %q, want live %q", key, want)
 	}
 }
 

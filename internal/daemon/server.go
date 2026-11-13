@@ -56,6 +56,7 @@ type Server struct {
 	mu       sync.Mutex
 	projects map[string]int64 // project key -> id
 	adopted  map[int64]bool
+	adopting map[int64]bool // single-flight: an adoption for this project is already running
 
 	// drainMu serializes spool drains (startup, ticker, before live events).
 	drainMu    sync.Mutex
@@ -73,6 +74,7 @@ func New(cfg *config.Config, st *store.Store, log *slog.Logger) *Server {
 		log:      log,
 		projects: map[string]int64{},
 		adopted:  map[int64]bool{},
+		adopting: map[int64]bool{},
 	}
 }
 
@@ -372,35 +374,55 @@ func (s *Server) projectFor(ctx context.Context, cwd string) (int64, project.Inf
 	s.mu.Lock()
 	id, ok := s.projects[info.Key]
 	s.mu.Unlock()
-	if ok {
+	if !ok {
+		var err error
+		if id, err = s.st.EnsureProject(ctx, info.Key, info.Name, info.Root); err != nil {
+			return 0, info, err
+		}
+		s.mu.Lock()
+		s.projects[info.Key] = id
+		s.mu.Unlock()
+	}
+	// An adoption that failed earlier (rival project, store error) is retried on the next
+	// event; concurrent events of one project must not stampede AdoptLegacy.
+	s.mu.Lock()
+	run := !s.adopted[id]
+	if run && s.adopting[id] {
+		s.mu.Unlock()
+		return id, info, nil // another goroutine is adopting this project right now
+	}
+	if run {
+		s.adopting[id] = true
+	}
+	s.mu.Unlock()
+	if !run {
 		return id, info, nil
 	}
-	id, err := s.st.EnsureProject(ctx, info.Key, info.Name, info.Root)
-	if err != nil {
-		return 0, info, err
+	defer func() {
+		s.mu.Lock()
+		delete(s.adopting, id)
+		s.mu.Unlock()
+	}()
+	merged, err := s.st.AdoptLegacy(ctx, id, info.Name)
+	if err == nil && merged {
+		s.mu.Lock()
+		s.adopted[id] = true // only a real merge counts; a declined one (rival project) is retried
+		s.mu.Unlock()
 	}
-	s.mu.Lock()
-	s.projects[info.Key] = id
-	first := !s.adopted[id]
-	s.mu.Unlock()
-	if first {
-		merged, err := s.st.AdoptLegacy(ctx, id, info.Name)
-		if err == nil {
-			s.mu.Lock()
-			s.adopted[id] = true // only after success, so a failed merge is retried
-			s.mu.Unlock()
-		}
-		if merged {
-			s.log.Info("adopted imported project", "name", info.Name, "key", info.Key)
-			for _, w := range s.workers {
-				w.Kick("", event.Reindex) // vector index caches project ids
-			}
+	if merged {
+		s.log.Info("adopted imported project", "name", info.Name, "key", info.Key)
+		for _, w := range s.workers {
+			w.Kick("", event.Reindex) // vector index caches project ids
 		}
 	}
 	return id, info, nil
 }
 
 // projectForSession keeps a session on its original project when later events report another cwd.
+// A session still pinned to an imported "legacy:<name>" project is the exception: resolving the
+// reported cwd runs adoption, which merges the legacy project - session included - into the live
+// one when the names match. Without it a resumed imported session could never leave its legacy
+// project, because the early return below never resolves the live cwd.
 func (s *Server) projectForSession(ctx context.Context, sid, cwd string) (int64, project.Info, error) {
 	sess, err := s.st.GetSession(ctx, sid)
 	if err != nil && !errors.Is(err, sql.ErrNoRows) {
@@ -408,8 +430,39 @@ func (s *Server) projectForSession(ctx context.Context, sid, cwd string) (int64,
 	}
 	if err == nil && sess.ProjectID != 0 {
 		p, err := s.st.ProjectByID(ctx, sess.ProjectID)
+		if errors.Is(err, sql.ErrNoRows) {
+			// A concurrent event of the same session adopted the legacy project away under
+			// us: the session row already points at the live project, so reread it once.
+			sess, err = s.st.GetSession(ctx, sid)
+			if err == nil {
+				p, err = s.st.ProjectByID(ctx, sess.ProjectID)
+			}
+			if errors.Is(err, sql.ErrNoRows) {
+				// The pinned project is gone for good (an import over a running daemon raced
+				// its own adoption): fall back to the live cwd instead of failing every
+				// future event of this session.
+				return s.projectFor(ctx, cwd)
+			}
+		}
 		if err != nil {
 			return 0, project.Info{}, err
+		}
+		if strings.HasPrefix(p.Key, "legacy:") {
+			pid, info, err := s.projectFor(ctx, cwd)
+			if err != nil {
+				return 0, project.Info{}, err
+			}
+			if pid != p.ID {
+				// Adoption deleted the legacy project and moved the session along with
+				// its memories. When it did not (name mismatch or rival projects), the
+				// session keeps the legacy project so it stays with its memories.
+				if _, err := s.st.ProjectByID(ctx, p.ID); errors.Is(err, sql.ErrNoRows) {
+					return pid, info, nil
+				} else if err != nil {
+					return 0, project.Info{}, err
+				}
+			}
+			return p.ID, project.Info{Key: p.Key, Name: p.Name, Root: p.Root}, nil
 		}
 		return p.ID, project.Info{Key: p.Key, Name: p.Name, Root: p.Root}, nil
 	}

@@ -12,6 +12,27 @@ config keys or the database schema; migrations run when the database is opened.
   automatic injection (1 = like native memories, 0 = never injected). Explicit search is not
   affected. The default is 1.
 
+## [2026.11.13] - 2026-11-13
+
+### Fixed
+
+- Adopt resumed imported sessions off their `legacy:` project into the live repository:
+  the early return that kept sessions on their original project also kept them pinned to
+  imported ones forever. A failed adoption (rival project, store error) is now retried on
+  the next event, concurrent adoptions are serialized, and a session whose pinned project
+  was deleted (an import racing a running daemon) falls back to the live working directory
+  instead of failing every event.
+- Import old claude-mem databases in full: `observations` and `session_summaries` steps
+  read `merged_into_project` (and late observation columns) only when the source has them,
+  so pre-merge databases no longer fail the whole import with "no such column".
+- Anthropic-compatible gateways that answer 200 and silently ignore `output_config` now
+  have a regression test pinning the prompt-side schema copy.
+
+### Added
+
+- `memory_search`, `memory_get` and `memory_timeline` MCP tools are annotated read-only,
+  so plan-mode clients can let them through.
+
 ## [2026.11.11] - 2026-11-11
 
 ### Fixed
@@ -66,6 +87,7 @@ First release.
   `<private>` blocks before anything is stored; private prompts keep their whole turn out
   of the database.
 
+[2026.11.13]: https://github.com/tazhate/agent-mem/releases/tag/v2026.11.13
 [2026.11.11]: https://github.com/tazhate/agent-mem/releases/tag/v2026.11.11
 [2026.11.09]: https://github.com/tazhate/agent-mem/releases/tag/v2026.11.09
 [0.1.0]: https://github.com/tazhate/agent-mem/releases/tag/v0.1.0
